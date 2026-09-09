@@ -1,0 +1,71 @@
+name: Harness canary
+
+# deepseek-harness is alpha and can land breaking changes without a version
+# bump (the 2026-08-30 JsonValue move — harness commit 6c53fe6e2a — broke
+# dsh-tabbit's tsc build while every peerDependencies range stayed
+# technically satisfied). This job rebuilds and tests dsh-tabbit against the
+# harness's own default branch on a schedule independent of dsh-tabbit's own
+# commit cadence, so a break shows up here within a day instead of whenever
+# someone next happens to run a local build.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      harness_ref:
+        description: 'deepseek-harness ref to build against'
+        required: false
+        default: master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-canary
+  cancel-in-progress: false
+
+jobs:
+  build-against-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout dsh-tabbit
+        uses: actions/checkout@v4
+
+      - name: Checkout deepseek-harness
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ inputs.harness_ref || 'master' }}
+          path: deepseek-harness
+
+      - name: Record harness commit
+        run: |
+          sha="$(git -C deepseek-harness rev-parse HEAD)"
+          echo "### Building against \`deepseek-ai/deepseek-harness@$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.7.0'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install harness dependencies
+        working-directory: deepseek-harness
+        run: pnpm install --frozen-lockfile
+
+      - name: Build harness (host face)
+        working-directory: deepseek-harness
+        run: npm run build:lib:host
+
+      - name: Link harness checkout into dsh-tabbit
+        run: npm run link-harness -- "$GITHUB_WORKSPACE/deepseek-harness"
+
+      - name: Install dsh-tabbit dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and test dsh-tabbit against harness
+        run: npm test
