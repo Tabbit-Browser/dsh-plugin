@@ -12,12 +12,19 @@
  *                 但【不会】拉起浏览器：离线就如实报离线。
  *
  * 选型背景（2026-08-28，与 Tabbit 团队确认）：persistent 模式（CLI 的 NDJSON
- * 交互式子命令）计划移除，不能依赖；而 socket 协议里的 unbound `tabs` 是
- * dispatch 的一等 case，与 persistent/bootstrap 绑定机制无关，且在 tab-browser
- * tip-of-tree 上逐行未变——这是"零浏览器改动 + 快速读取"的唯一交集。
+ * 交互式子命令）计划移除，不能依赖；当时 socket 协议里的 unbound `tabs` 是
+ * dispatch 的一等 case，与 persistent/bootstrap 绑定机制无关——这是"零浏览器
+ * 改动 + 快速读取"的唯一交集。
+ * 后续（2026-09-01 浏览器提交 556476dd92b，1.13.20 起）persistent/bound 整套
+ * 连接模式被删，unbound `tabs` 一并消失（dispatch 只剩 `cli` 与 `ping`），
+ * 同一批次还删掉了 `tasks` CLI 子命令（client.ts 的 listTasks 另有适配）。
+ * 于是清单读取分两代（见 listAllTabs）：
+ *   - 旧代（1.11.16 ～ 1.13.8）：{"op":"tabs"} 直取；
+ *   - 新代（1.13.20+）：{"op":"tabs"} 回 METHOD_NOT_FOUND，改在同一条 socket
+ *     上发 {"op":"cli", argv:["tabs", ...]}——仍然不经 launcher、不拉起浏览器。
  *
- * ─── 线上协议（对 Dev 1.13.8 / 稳定 1.11.16 / tip-of-tree 三版源码核对一致，
- *      并经真机验证；服务端实现 runtime-public-server.mjs + runtime-service.mjs）───
+ * ─── 线上协议（对 1.11.16 / 1.13.8 / 1.13.24 三版源码核对，并经真机验证；
+ *      服务端实现 runtime-public-server.mjs + runtime-service.mjs）───
  *
  *  1. endpoint.json（schema v2，浏览器 C++ 侧 local_agent_endpoint.cc 写出）：
  *       {version:2, kind:"browser-runtime-service", transport, address,
@@ -35,20 +42,29 @@
  *  4. 认证后每帧一个请求对象，响应一行 {ok:true,value} 或
  *     {ok:false,error:{name,code,message}}。非 persistent 连接一问一答后由
  *     服务端主动收尾；我们读到响应行就自行断开，不依赖这一行为。
- *  5. unbound {"op":"tabs"}（连接上没有任务绑定时）：返回全 profile 标签页
- *     清单。服务端内部开一个临时会话并在同一 dispatch 里 finalize(keep:true)
- *     ——不产生任务、页面、标签组，也不出现在 `tasks` 列表里（真机核查）。
- *     {"op":"ping"} 返回 {running:true, generation}，可当健康检查。
+ *  5. 旧代 unbound {"op":"tabs"}：返回全 profile 标签页清单。服务端内部开一个
+ *     临时会话并在同一 dispatch 里 finalize(keep:true)——不产生任务、页面、
+ *     标签组，也不出现在 `tasks` 列表里（真机核查）。
+ *     新代 {"op":"cli","argv":[...],"stdin":""}：与 launcher 子进程走的是同一个
+ *     runCliCommand。`tabs --task <名> --limit ≤200 [--cursor <游标>]` 遍历所有
+ *     普通窗口、带分组信息；它按 --task 名 useTask 建一个任务、列完就
+ *     finish(keep:true)——C++ 侧 OpenSession 只登记会话对象，不开页、不建组，
+ *     用户看不到任何变化，只是比直取慢（毫秒到百毫秒级）。清单超过 --limit
+ *     时带 nextCursor 翻页；两页之间标签页变了服务端回 STALE_CURSOR。
+ *     状态词汇也换代了：旧代 available|owned|busy，新代 available|owned|claimed
+ *     （claimed = 被别的任务占有，即旧代的 busy）。
+ *     {"op":"ping"} 两代都返回 {running:true, generation}，可当健康检查。
  *  6. 服务端限额：认证帧 ≤4KB、请求 ≤64MB、8 并发 dispatch（超了回
  *     SERVICE_BUSY）、未认证连接空闲 5 秒收、dispatch 超时 150 秒。
  *
  * 错误统一包装成 TabbitCliError（与 CLI 通道共用一套错误分类，上层不用区分
  * 消息是从哪条通道冒出来的）。
  */
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 
-import { TabbitCliError, classifyAppError } from './errors.js';
+import { CLI_ERROR_CODES, TabbitCliError, classifyAppError } from './errors.js';
 
 /* 我们支持的 endpoint.json schema 版本（浏览器侧 kBrowserRuntimeEndpointVersion）。 */
 const ENDPOINT_SCHEMA_VERSION = 2;
@@ -76,7 +92,8 @@ export interface TabbitTabDescriptor {
   title: string;
   url: string;
   active: boolean;
-  /* available=无主可认领；owned=已属于某个本插件可见的工作区；busy=被别的工作区占有。 */
+  /* available=无主可认领；owned=属于发起清单的那个任务（清单用的是临时任务，
+   * 实际不会出现）；busy=被别的任务占有（新代服务端叫 claimed，读入时归一为 busy）。 */
   state: 'available' | 'owned' | 'busy';
   /* 所在标签组的元数据；不在任何组里时为 null。组标题只是展示文本，不是身份。 */
   group: { groupId: string; title: string } | null;
@@ -269,15 +286,80 @@ export async function requestViaEndpoint(
   }
 }
 
+/* CLI 分页清单每页上限（服务端 --limit 的硬上限）与最多翻页数（防游标环路自旋）。 */
+const CLI_TABS_PAGE_LIMIT = 200;
+const CLI_TABS_MAX_PAGES = 25;
+
 /*
  * 全 profile 标签页清单（含用户自己开的页面，不限于代理任务页）。
- * 零副作用：不建任务、不开页面、不出现在 tasks 列表（服务端 unbound tabs
- * 的固有语义）。返回值形状逐字段校验——数据要进提示词/UI，宁可在这里挡住
- * 服务端未来的形状漂移，也不把 unknown 直接漏给上层。
+ * 两代读取路径（见文件头第 5 条）：先按旧代直取 {"op":"tabs"}（稳态 ~1ms）；
+ * 服务端回 METHOD_NOT_FOUND 说明是 1.13.20+ 的新代，改走同一 socket 上的
+ * CLI `tabs` 分页拼全量。为什么不干脆只走 CLI：旧代的 CLI `tabs` 没有
+ * --limit/--cursor（默认 50 条就截断），直取才是旧代的全量路径。
+ * 两条路径都不经 launcher，浏览器离线照旧如实报离线（不会拉起浏览器）。
+ * 返回值形状逐字段校验——数据要进提示词/UI，宁可在这里挡住服务端未来的
+ * 形状漂移，也不把 unknown 直接漏给上层。
  */
 export async function listAllTabs(endpointPath: string, options?: EndpointRequestOptions): Promise<TabbitTabInventory> {
-  const value = await requestViaEndpoint(endpointPath, { op: 'tabs' }, options);
-  const inventory = value as { tabs?: unknown; truncated?: unknown };
+  let value: unknown;
+  try {
+    value = await requestViaEndpoint(endpointPath, { op: 'tabs' }, options);
+  } catch (error) {
+    if (!(error instanceof TabbitCliError) || error.code !== CLI_ERROR_CODES.methodNotFound) throw error;
+    return await listAllTabsViaCli(endpointPath, options);
+  }
+  const page = normalizeInventoryPage(value);
+  return { tabs: page.tabs, truncated: page.truncated };
+}
+
+/*
+ * 新代路径：在公开端点上直接投递 CLI `tabs` 子命令并按 nextCursor 翻页。
+ * 游标失效（STALE_CURSOR：翻页期间用户开/关了标签页）从头重来一次；再失效
+ * 就原样上抛——清单变动得比翻页还快，不值得无限追。
+ */
+async function listAllTabsViaCli(endpointPath: string, options?: EndpointRequestOptions): Promise<TabbitTabInventory> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await listAllTabsViaCliOnce(endpointPath, options);
+    } catch (error) {
+      if (attempt === 0 && error instanceof TabbitCliError && error.code === CLI_ERROR_CODES.staleCursor) continue;
+      throw error;
+    }
+  }
+}
+
+/*
+ * 一轮完整翻页。任务名每次随机：CLI 对不存在的 --task 名 useTask 新建、列完
+ * finish；若两次并发清单共用一个名字，后到的会复用前者的任务（reused），而
+ * 前者列完就把任务 finish 掉，后者的请求便撞上 "Task is closing"。随机名让
+ * 每次清单各用各的任务互不干扰；同一轮的各页沿用同一个名字即可。
+ */
+async function listAllTabsViaCliOnce(endpointPath: string, options?: EndpointRequestOptions): Promise<TabbitTabInventory> {
+  const task = `dsh-tab-inventory-${randomUUID().slice(0, 8)}`;
+  const tabs: TabbitTabDescriptor[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < CLI_TABS_MAX_PAGES; page += 1) {
+    const argv = ['tabs', '--task', task, '--limit', String(CLI_TABS_PAGE_LIMIT)];
+    if (cursor !== undefined) argv.push('--cursor', cursor);
+    // stdin 必须给字符串（哪怕为空）：服务端 runCliCommand 对非字符串直接抛 TypeError。
+    const value = await requestViaEndpoint(endpointPath, { op: 'cli', argv, stdin: '' }, options);
+    const inventory = normalizeInventoryPage(value);
+    tabs.push(...inventory.tabs);
+    // 没截断 = 已到末页；截断却没给游标是服务端形状异常，按"截断"如实上报。
+    if (!inventory.truncated) return { tabs, truncated: false };
+    if (inventory.nextCursor === undefined) return { tabs, truncated: true };
+    cursor = inventory.nextCursor;
+  }
+  return { tabs, truncated: true };
+}
+
+/*
+ * 校验并归一化一页清单（两代路径共用）。状态词汇归一：新代的 claimed 与旧代
+ * 的 busy 同义（被别的任务占有），都记为 busy——若放任它落到 available，上层
+ * 会拿它去 claim_tabs 然后撞 TAB_OWNERSHIP_CONFLICT。
+ */
+function normalizeInventoryPage(value: unknown): TabbitTabInventory & { nextCursor?: string } {
+  const inventory = value as { tabs?: unknown; truncated?: unknown; nextCursor?: unknown };
   if (typeof inventory !== 'object' || inventory === null || !Array.isArray(inventory.tabs)) {
     throw new TabbitCliError({
       kind: 'protocol',
@@ -298,14 +380,18 @@ export async function listAllTabs(endpointPath: string, options?: EndpointReques
       title: typeof tab.title === 'string' ? tab.title : '',
       url: tab.url,
       active: tab.active === true,
-      state: tab.state === 'owned' || tab.state === 'busy' ? tab.state : 'available',
+      state: tab.state === 'owned' ? 'owned' : tab.state === 'busy' || tab.state === 'claimed' ? 'busy' : 'available',
       group:
         typeof group === 'object' && group !== null && typeof group.groupId === 'string'
           ? { groupId: group.groupId, title: typeof group.title === 'string' ? group.title : '' }
           : null,
     });
   }
-  return { tabs, truncated: inventory.truncated === true };
+  return {
+    tabs,
+    truncated: inventory.truncated === true,
+    ...(typeof inventory.nextCursor === 'string' && inventory.nextCursor !== '' ? { nextCursor: inventory.nextCursor } : {}),
+  };
 }
 
 /* 健康检查：浏览器在线时返回 {running:true, generation}。 */

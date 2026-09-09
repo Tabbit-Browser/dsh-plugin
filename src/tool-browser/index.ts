@@ -25,7 +25,7 @@
  *  - output.render(args, value)：把结果 JSON 渲染成实际进入模型上下文的
  *    【内容块（ContentBlock）数组】——文本块+图像块，这是截图能"被看见"
  *    的机关所在；
- *  - timeoutMs：dsh 对整个 execute 的超时（要 > 我们内部 CLI 的 145 秒超时，
+ *  - timeoutMs：dsh 对整个 execute 的超时（要 > 我们内部 CLI 的 170 秒超时，
  *    否则 dsh 会先掐掉）；
  *  - execute(args, exec)：真正的执行体。exec 里有 agent（发起会话）、
  *    signal（取消信号，用户点停止时触发）等。
@@ -189,7 +189,8 @@ export function apply(ctx: Context): void {
         },
         timeout_ms: {
           type: 'integer',
-          description: 'Per-call evaluation timeout in milliseconds, max 120000 (default 120000).',
+          description:
+            'Per-call evaluation timeout in milliseconds, from 60000 to 120000 (default 120000); values outside that range are clamped into it.',
         },
         // claim_tabs：把用户【明确指给模型】的已有标签页认领进任务。两条路径：
         //  - 任务是本次调用【新建】的：走 evaluate() 自带的 --claim-tab（创建时
@@ -227,9 +228,10 @@ export function apply(ctx: Context): void {
         // 结果 JSON → 内容块（文本 + 截图图像块）的渲染，见 renderValue。
         render: (_args, value) => renderValue(value as BrowserToolValue),
       },
-      // dsh 层的执行超时：160 秒 > 内部 CLI 子进程的 145 秒，保证内部超时
-      // 先触发、能给出更有含义的错误（而不是被 dsh 一刀切掐掉）。
-      timeoutMs: 160_000,
+      // dsh 层的执行超时：185 秒 > 内部 CLI 子进程的 170 秒（client.ts 的
+      // SUBPROCESS_TIMEOUT_MS），保证内部超时先触发、能给出更有含义的错误
+      // （而不是被 dsh 一刀切掐掉）。
+      timeoutMs: 185_000,
       async execute(args, exec): Promise<JsonValue> {
         const tabbit = ctx.tabbit;
         // 极端情况下工具可能无所属 agent（如某些编排形态），用 'shared' 兜底。

@@ -256,8 +256,9 @@ export class TabbitService {
 
   /*
    * 全 profile 标签页清单（含用户自己开的页面）——【不经模型、不经 CLI 子进程】
-   * 的直连读取（runtime/endpoint.ts，稳态 ~1ms），零副作用：不建任务、不开
-   * 页面、不出现在 tasks 列表。
+   * 的直连读取（runtime/endpoint.ts；旧代浏览器一次 socket 请求 ~1ms，1.13.20+
+   * 改在同一 socket 上投递 CLI `tabs` 分页拼全量），用户可见的副作用为零：
+   * 不开页面、不建标签组（新代会用一个随机名的临时任务列完即 finish）。
    *
    * 实例定位与求值路径刻意不同：求值走 launcher（能自动拉起浏览器），清单是
    * 被动读取——【绝不能因为一次列表查询把浏览器拉起来】（同 mentions 里

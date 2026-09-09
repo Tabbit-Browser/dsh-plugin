@@ -2,6 +2,18 @@
 
 ## 0.3.4
 
+- Adapted to Tabbit Browser 1.13.20+
+  (https://github.com/Tabbit-Browser/dsh-tabbit/issues/23). Those builds
+  removed the Runtime Service's unbound `tabs` socket operation and the
+  `tasks` CLI subcommand, and 1.13.23+ rejects any `--timeout-ms` below
+  60000 — which broke `list_tabs`, the `@tab` menu, browser-backed
+  `web_fetch`, and `/tabbit-info`'s task list. The tab inventory now falls
+  back to the CLI `tabs` command over the same socket (paged, still without
+  launching the browser; the new `claimed` state maps to `busy`), task
+  listing reads `diagnose` first and only then the legacy `tasks`, and
+  evaluation timeouts are clamped to 60000–120000 ms, the range both old and
+  new browsers accept. The internal CLI subprocess timeout grew to 170 s to
+  cover the new CLI's longer wait.
 - `/tabbit-info` no longer appends a custom `tabbit/status` event to the
   session log. DSH refuses to read a session containing an event type it
   does not know unless that event is marked `ignorable`, and a plugin has no

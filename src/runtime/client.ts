@@ -22,11 +22,13 @@
  *    globalThis（跨调用持久，可以存变量）、自己的 artifacts 目录；
  *  - 任务【只能看到自己打开的或被显式 claim（认领）的标签页】，无法枚举
  *    用户的其它标签页——这是浏览器侧的安全边界；
- *  - 整机最多 8 个并发任务；单次求值最长 120 秒；
+ *  - 整机最多 8 个并发任务；单次求值超时的可接受区间两代不同，见
+ *    EVAL_TIMEOUT_FLOOR_MS / EVAL_TIMEOUT_CEILING_MS 的注释；
  *  - 本客户端用到的 CLI 动词：`nodejs`（求值，创建时可带 --claim-tab）、
  *    `finish`（结束任务，keep 语义两代有别，见 finishTask 注释）、
  *    `receipt`（查回执）、`checkpoint`（检查点）、`resource`（分块读资源）、
- *    `tasks`（列任务）、`claim`（对已存在的任务追加认领标签页，见
+ *    `diagnose`（诊断快照；1.13.20+ 用它的 tasks 字段列任务，旧代仍用
+ *    `tasks` 子命令，见 listTasks()）、`claim`（对已存在的任务追加认领标签页，见
  *    claimTabs()——真机 `--help` 确认过是独立顶层子命令，不是只存在于
  *    persistent 帧协议里）。新代 CLI（1.11.16+）另有 tabs/resume/
  *    screenshot/inspect/paste 和 persistent 持久模式（JSON 帧协议）——
@@ -71,7 +73,7 @@ export interface EvaluateRequest {
   code: string;
   /* 声明本次调用无副作用（只读）。好处：中断后服务端不会隔离任务。 */
   readOnly?: boolean;
-  /* 单次求值超时；服务端硬上限 120_000 毫秒。 */
+  /* 单次求值超时；发给服务端前会钳位到 [EVAL_TIMEOUT_FLOOR_MS, EVAL_TIMEOUT_CEILING_MS]。 */
   timeoutMs?: number;
   /* 要认领的标签页 id——【只在本次调用恰好创建该任务时生效】。 */
   claimTabs?: number[];
@@ -118,11 +120,21 @@ export interface TaskListEntry extends TaskMetadata {
   receiptCount?: number;
 }
 
-/* 求值超时的天花板：服务端硬上限 120 秒，请求再大也压到这里。 */
-const EVAL_TIMEOUT_CEILING_MS = 120_000;
-/* CLI 子进程的墙钟超时。CLI 自己会等结果最长 125 秒，浏览器冷启动还要 ~20 秒，
- *  所以子进程超时必须比求值超时富余一大截，否则会在正常等待时误杀。 */
-const SUBPROCESS_TIMEOUT_MS = 145_000;
+/*
+ * 求值超时的区间。两代服务端对 --timeout-ms 的接受范围不同（浏览器源码核对）：
+ *   - 旧代（≤1.13.22）：(0, 120000]；
+ *   - 新代（1.13.23+，提交 6d261ffd588）：[60000, 180000]，低于 60 秒直接拒绝
+ *     "--timeout-ms must be from 60000 through 180000"。
+ * 取两者交集 [60000, 120000]，不探测版本也能两代通吃：调用方传得更小就抬到
+ * 60 秒（真实等待会比它想的长一点，但不会整个失败），更大就压到 120 秒。
+ * export 仅为单元测试与上层文案引用。
+ */
+export const EVAL_TIMEOUT_FLOOR_MS = 60_000;
+export const EVAL_TIMEOUT_CEILING_MS = 120_000;
+/* CLI 子进程的墙钟超时。新代 CLI 会等结果到 timeoutMs + 20 秒清理宽限（最长
+ *  140 秒），浏览器冷启动还要 ~20 秒，所以子进程超时必须比求值超时富余一大截
+ *  （这里留 170 秒），否则会在正常等待时误杀。tool-browser 的 dsh 层超时要 > 它。 */
+const SUBPROCESS_TIMEOUT_MS = 170_000;
 /* 控制类命令（finish/receipt/resource/tasks）的超时——也要容纳浏览器自动拉起的 ~20 秒。 */
 const CONTROL_TIMEOUT_MS = 40_000;
 /* 溢出资源默认最多读回 4 MB。 */
@@ -318,8 +330,8 @@ export class TabbitClient {
     const argv = ['nodejs', '--task', request.task, '--request-id', requestId];
     if (request.readOnly) argv.push('--read-only');
     if (request.foreground) argv.push('--foreground');
-    // 超时钳位到 [1000, 120000] 区间（服务端上限 120 秒）。
-    const timeoutMs = Math.min(Math.max(request.timeoutMs ?? EVAL_TIMEOUT_CEILING_MS, 1000), EVAL_TIMEOUT_CEILING_MS);
+    // 超时钳位到 [60000, 120000]（两代服务端接受范围的交集，见常量注释）。
+    const timeoutMs = Math.min(Math.max(request.timeoutMs ?? EVAL_TIMEOUT_CEILING_MS, EVAL_TIMEOUT_FLOOR_MS), EVAL_TIMEOUT_CEILING_MS);
     argv.push('--timeout-ms', String(timeoutMs));
     for (const tab of request.claimTabs ?? []) argv.push('--claim-tab', String(tab));
 
@@ -506,8 +518,18 @@ export class TabbitClient {
     };
   }
 
-  /* 列出当前实例上的所有任务（`tasks` 命令）。返回值形状异常时兜底为空数组。 */
+  /*
+   * 列出当前实例上的所有任务。两代 CLI 的入口不同（浏览器源码核对）：
+   *   - 新代（1.13.20+）：`tasks` 子命令已删（提交 556476dd92b），改由不带
+   *     --task 的 `diagnose` 在 tasks 字段里给出任务列表（条目是旧 `tasks`
+   *     输出的超集：taskId/taskName/idle/quarantined/... 外加归属诊断）；
+   *   - 旧代（≤1.13.8）：`diagnose` 只回计数、没有 tasks 字段，`tasks` 才是列表。
+   * 所以先 `diagnose`（两代都存在、都不报错），没有 tasks 数组再退回 `tasks`。
+   * 返回值形状异常时兜底为空数组。
+   */
   async listTasks(): Promise<TaskListEntry[]> {
+    const diagnosis = (await this.invoke(['diagnose'], '', CONTROL_TIMEOUT_MS)) as { tasks?: unknown } | undefined;
+    if (Array.isArray(diagnosis?.tasks)) return diagnosis.tasks as TaskListEntry[];
     const value = await this.invoke(['tasks'], '', CONTROL_TIMEOUT_MS);
     return Array.isArray(value) ? (value as TaskListEntry[]) : [];
   }

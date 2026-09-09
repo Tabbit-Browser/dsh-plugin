@@ -50,8 +50,10 @@ import type { WebFetchProvider, WebFetchRequest, WebFetchResult } from '@deepsee
 const MAX_TEXT_CHARS = 180_000;
 /* 页面导航（goto）超时。 */
 const NAV_TIMEOUT_MS = 25_000;
-/* 整段求值超时（导航 + 稳定等待 + 提取，留了余量）。 */
-const EVAL_TIMEOUT_MS = 45_000;
+/* 整段求值超时（导航 + 稳定等待 + 提取）。1.13.23+ 的 CLI 拒绝低于 60 秒的
+ * --timeout-ms（client.ts 会把更小的值抬上去），所以这里直接取 60 秒——真正
+ * 兜住抓取时长的是上面 25 秒的导航超时，这只是最外层的保险。 */
+const EVAL_TIMEOUT_MS = 60_000;
 
 /* 浏览器侧提取脚本返回的数据形状。 */
 interface FetchEvalValue {

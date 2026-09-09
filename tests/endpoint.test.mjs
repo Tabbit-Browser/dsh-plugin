@@ -31,8 +31,10 @@ function socketPath() {
  *   error          —— 回 {ok:false,error:{code:'SERVICE_BUSY'}}；
  *   silent         —— 收帧不回（测客户端超时）。
  * onBadAuth 在认证失败断开【之前】同步调用（测凭据轮换恢复时用它改写 endpoint 文件）。
+ * handler(request) 给出时优先：按请求帧内容返回整帧 {ok,value|error}（模拟按 op
+ * 分派的服务端，测新代 CLI 回退路径）。
  */
-async function startFakeService({ value, behavior = 'respond', token = TOKEN, onBadAuth } = {}) {
+async function startFakeService({ value, behavior = 'respond', token = TOKEN, onBadAuth, handler } = {}) {
   const address = socketPath()
   const connections = []
   const server = createServer((socket) => {
@@ -56,6 +58,12 @@ async function startFakeService({ value, behavior = 'respond', token = TOKEN, on
             return
           }
           authenticated = true
+          continue
+        }
+        if (handler) {
+          let request
+          try { request = JSON.parse(frame) } catch { request = undefined }
+          socket.end(`${JSON.stringify(handler(request))}\n`)
           continue
         }
         if (behavior === 'silent') continue
@@ -143,6 +151,119 @@ test('listAllTabs drops malformed entries and normalizes unknown states', async 
       assert.equal(inventory.tabs[0].tabId, 21)
       assert.equal(inventory.tabs[0].state, 'available')
       assert.equal(inventory.tabs[0].group, null)
+    })
+  } finally {
+    await service.close()
+  }
+})
+
+/*
+ * 1.13.20+ 的服务端：unbound tabs 已删（METHOD_NOT_FOUND），清单改走同一
+ * socket 上的 CLI `tabs` 子命令（{op:'cli', argv, stdin}），按 nextCursor 翻页。
+ * 假服务按 argv 里的 --cursor 决定给哪一页，并记录每次 cli 帧供断言；
+ * staleOnce 让第一次带游标的请求回 STALE_CURSOR（测从头重翻）。
+ */
+function cliTabsService(pages, { staleOnce = false, cliError } = {}) {
+  const calls = []
+  let staleServed = false
+  const unknownOp = (op) => ({ ok: false, error: { name: 'Error', code: 'METHOD_NOT_FOUND', message: `Unknown runtime service operation: ${op}` } })
+  return {
+    calls,
+    handler(request) {
+      if (request.op !== 'cli') return unknownOp(request.op)
+      calls.push(request)
+      if (cliError) return { ok: false, error: cliError }
+      const cursorIndex = request.argv.indexOf('--cursor')
+      const cursor = cursorIndex >= 0 ? request.argv[cursorIndex + 1] : undefined
+      if (cursor !== undefined && staleOnce && !staleServed) {
+        staleServed = true
+        return { ok: false, error: { name: 'Error', code: 'STALE_CURSOR', message: 'Tab inventory changed; restart pagination' } }
+      }
+      const page = pages[cursor === undefined ? 0 : Number(cursor.slice('cursor-'.length))]
+      return page ? { ok: true, value: page } : { ok: false, error: { name: 'Error', code: 'INVALID_ARGUMENT', message: 'bad cursor' } }
+    },
+  }
+}
+
+const CLI_PAGE_1 = {
+  truncated: true,
+  nextCursor: 'cursor-1',
+  tabs: [
+    { tabId: 31, windowId: 1, index: 0, title: '第一页', url: 'https://example.com/1', active: true, state: 'available', group: null },
+    { tabId: 32, windowId: 2, index: 0, title: '别的任务占着', url: 'https://example.com/2', active: false, state: 'claimed', group: { groupId: 'G1', title: '调研' } },
+  ],
+}
+const CLI_PAGE_2 = {
+  truncated: false,
+  tabs: [
+    { tabId: 33, windowId: 2, index: 1, title: '末页', url: 'https://example.com/3', active: false, state: 'available', group: null },
+  ],
+}
+
+test('listAllTabs falls back to the CLI tabs command when the unbound op is gone (1.13.20+)', async () => {
+  const fake = cliTabsService([CLI_PAGE_1, CLI_PAGE_2])
+  const service = await startFakeService({ handler: fake.handler })
+  try {
+    await withEndpointFile(endpointJson(service.address), async (path) => {
+      const inventory = await listAllTabs(path)
+      // 两页拼成全量；claimed（被别的任务占有）归一为 busy，绝不能落成 available。
+      assert.deepEqual(
+        inventory.tabs.map((tab) => [tab.tabId, tab.state]),
+        [[31, 'available'], [32, 'busy'], [33, 'available']],
+      )
+      assert.equal(inventory.truncated, false)
+      assert.deepEqual(inventory.tabs[1].group, { groupId: 'G1', title: '调研' })
+
+      // 每页都是 cli 帧：tabs --task <随机名> --limit 200 [--cursor]；stdin 必须是字符串。
+      assert.equal(fake.calls.length, 2)
+      for (const call of fake.calls) {
+        assert.equal(call.stdin, '')
+        assert.deepEqual(call.argv.slice(0, 2), ['tabs', '--task'])
+        assert.match(call.argv[2], /^dsh-tab-inventory-[0-9a-f]{8}$/u)
+        assert.deepEqual(call.argv.slice(3, 5), ['--limit', '200'])
+      }
+      assert.equal(fake.calls[0].argv.includes('--cursor'), false)
+      assert.deepEqual(fake.calls[1].argv.slice(5), ['--cursor', 'cursor-1'])
+      // 同一轮清单的各页沿用同一个任务名。
+      assert.equal(fake.calls[0].argv[2], fake.calls[1].argv[2])
+
+      // 再列一次：任务名换新（并发清单互不干扰的前提）。
+      await listAllTabs(path)
+      assert.equal(fake.calls.length, 4)
+      assert.notEqual(fake.calls[2].argv[2], fake.calls[0].argv[2])
+    })
+  } finally {
+    await service.close()
+  }
+})
+
+test('listAllTabs restarts CLI pagination once on STALE_CURSOR', async () => {
+  const fake = cliTabsService([CLI_PAGE_1, CLI_PAGE_2], { staleOnce: true })
+  const service = await startFakeService({ handler: fake.handler })
+  try {
+    await withEndpointFile(endpointJson(service.address), async (path) => {
+      const inventory = await listAllTabs(path)
+      assert.deepEqual(inventory.tabs.map((tab) => tab.tabId), [31, 32, 33])
+      // 第 1 页 → 第 2 页 STALE → 重来：第 1 页 → 第 2 页，共 4 次；重来用新任务名。
+      assert.equal(fake.calls.length, 4)
+      assert.notEqual(fake.calls[2].argv[2], fake.calls[0].argv[2])
+    })
+  } finally {
+    await service.close()
+  }
+})
+
+test('other CLI-path errors surface with their own code instead of being retried', async () => {
+  const fake = cliTabsService([], { cliError: { name: 'Error', code: 'TASK_LIMIT_REACHED', message: 'Task limit of 8 reached' } })
+  const service = await startFakeService({ handler: fake.handler })
+  try {
+    await withEndpointFile(endpointJson(service.address), async (path) => {
+      await assert.rejects(listAllTabs(path), (error) => {
+        assert.equal(error.name, 'TabbitCliError')
+        assert.equal(error.code, 'TASK_LIMIT_REACHED')
+        return true
+      })
+      assert.equal(fake.calls.length, 1)
     })
   } finally {
     await service.close()

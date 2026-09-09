@@ -90,9 +90,14 @@ import { instanceIdForPeerPort } from '../runtime/peer.js';
 import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-host-webserver';
 
-/* 各路由里浏览器求值的超时与提取上限。 */
-const ROSTER_TIMEOUT_MS = 15_000;
-const EXTRACT_TIMEOUT_MS = 20_000;
+/*
+ * 各路由里浏览器求值的超时与提取上限。求值超时统一 60 秒：1.13.23+ 的 CLI
+ * 拒绝更小的 --timeout-ms（client.ts 会抬到 60 秒），写小了只是自欺——候选
+ * 清单与提取的代码本身都是毫秒级，这个值只在页面卡死时才起作用。
+ * 直连清单（listAllTabs）不经 CLI、不受该下限约束，单独给一个短超时。
+ */
+const EVAL_TIMEOUT_MS = 60_000;
+const INVENTORY_TIMEOUT_MS = 15_000;
 const EXTRACT_MAX_CHARS = 60_000;
 
 /*
@@ -387,7 +392,7 @@ async function handleRoster(ctx: Context, req: IncomingMessage, res: ServerRespo
       const outcome = await ctx.tabbit.client().evaluate({
         task,
         readOnly: true,
-        timeoutMs: ROSTER_TIMEOUT_MS,
+        timeoutMs: EVAL_TIMEOUT_MS,
         // ⚠️ 下面是发往浏览器执行的代码原文，勿在字符串内加注释。
         code: `const out = [];
 const list = pages();
@@ -421,7 +426,7 @@ return out;`,
   }
 
   try {
-    const inventory = await ctx.tabbit.listAllTabs({ timeoutMs: ROSTER_TIMEOUT_MS });
+    const inventory = await ctx.tabbit.listAllTabs({ timeoutMs: INVENTORY_TIMEOUT_MS });
     const userTabs = inventory.tabs
       .filter((tab) => tab.state === 'available' && mentionableUserTabUrl(tab.url))
       .sort((a, b) => Number(b.active) - Number(a.active) || a.windowId - b.windowId || a.index - b.index)
@@ -549,7 +554,7 @@ async function handleExtract(ctx: Context, stash: Map<string, StashedExtraction>
     const outcome = await ctx.tabbit.client().evaluate({
       task,
       readOnly: true,
-      timeoutMs: EXTRACT_TIMEOUT_MS,
+      timeoutMs: EVAL_TIMEOUT_MS,
       // ⚠️ 下面是发往浏览器执行的代码原文，勿在字符串内加注释。
       code: `const wantedUrl = ${JSON.stringify(url)};
 const wantedIndex = ${JSON.stringify(index)};
@@ -591,7 +596,7 @@ async function extractUserTab(ctx: Context, stash: Map<string, StashedExtraction
     const outcome = await client.evaluate({
       task: FETCH_TASK_NAME,
       readOnly: true,
-      timeoutMs: EXTRACT_TIMEOUT_MS,
+      timeoutMs: EVAL_TIMEOUT_MS,
       // ⚠️ 下面是发往浏览器执行的代码原文，勿在字符串内加注释。
       code: `const target = ${JSON.stringify(url)};
 const p = await context.newPage();

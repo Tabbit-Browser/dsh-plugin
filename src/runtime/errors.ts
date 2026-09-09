@@ -35,7 +35,7 @@ export const CLI_ERROR_CODES = {
   browserUnavailable: 'BROWSER_RUNTIME_UNAVAILABLE',
   /* 服务端并发已满，暂时忙。 */
   serviceBusy: 'SERVICE_BUSY',
-  /* 单次求值超时（服务端上限 120 秒）。 */
+  /* 单次求值超时（服务端上限：旧代 120 秒，1.13.23+ 为 180 秒）。 */
   taskTimeout: 'TASK_TIMEOUT',
   /* 任务数达到上限（整台机器最多 8 个并发任务）。 */
   taskLimitReached: 'TASK_LIMIT_REACHED',
@@ -57,6 +57,10 @@ export const CLI_ERROR_CODES = {
   codeTooLarge: 'CODE_TOO_LARGE',
   /* 返回结果体积超限。 */
   resultTooLarge: 'RESULT_TOO_LARGE',
+  /* 公开端点不认识请求里的 op（1.13.20+ 删掉了 unbound tabs，见 endpoint.ts）。 */
+  methodNotFound: 'METHOD_NOT_FOUND',
+  /* 清单分页游标失效：两页之间标签页变了，服务端要求从头重新翻页。 */
+  staleCursor: 'STALE_CURSOR',
 } as const;
 
 /*
