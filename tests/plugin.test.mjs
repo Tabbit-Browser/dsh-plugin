@@ -188,7 +188,7 @@ test('the update tool defers to the browser for managed (preinstalled) copies', 
   assert.equal(checked, 0)
 })
 
-test('/tabbit-info 落一条 tabbit/status 会话事件并把它指给命令结果', async () => {
+test('/tabbit-info 把整份报告放进命令结果文本，不向会话日志追加任何事件', async () => {
   // 封闭性：HOME 指到空目录 → 实例注册表读不到（instances 为空、无 CLI
   // 调用），settings 里 launcherPath 再指到不存在的路径 → 结论走“未安装”
   // 分支。整个 handler 不碰真实浏览器/文件系统。
@@ -223,6 +223,8 @@ test('/tabbit-info 落一条 tabbit/status 会话事件并把它指给命令结�
     const info = commands.find(definition => definition.name === 'tabbit-info')
     assert.ok(info, 'tabbit-info command registered')
 
+    // 回归守卫（issue #22）：宿主对不认识的事件类型整会话拒读，而插件没有
+    // 设置 ignorable 标记的入口——handler 绝不能碰 session.append。
     const appended = []
     const session = {
       append(type, data) {
@@ -236,19 +238,12 @@ test('/tabbit-info 落一条 tabbit/status 会话事件并把它指给命令结�
       signal: new AbortController().signal,
     })
 
-    // 事件：一条整值 tabbit/status，结论与完整报告分开存，时间戳为数字。
-    assert.equal(appended.length, 1)
-    assert.equal(appended[0].type, 'tabbit/status')
-    const { at, conclusion, report } = appended[0].data
-    assert.equal(typeof at, 'number')
-    assert.match(conclusion, /^\u26a0\ufe0f Tabbit Browser not found/u)
-    assert.ok(report.startsWith(conclusion + '\n'))
-    assert.match(report, /instances: none registered/u)
-
-    // 命令返回：结论行做文本兑底，sourceEventSeq 指回刚才那条事件。
+    assert.equal(appended.length, 0)
     assert.equal(result.kind, 'success')
-    assert.equal(result.text, conclusion)
-    assert.equal(result.sourceEventSeq, 0)
+    assert.equal(result.sourceEventSeq, undefined)
+    // 命令文本就是整份报告：首行结论（跟随用户语言），后面跟英文明细。
+    assert.match(result.text, /^\u26a0\ufe0f Tabbit Browser not found/u)
+    assert.match(result.text, /\ninstances: none registered/u)
   } finally {
     if (savedHome === undefined) delete process.env.HOME
     else process.env.HOME = savedHome

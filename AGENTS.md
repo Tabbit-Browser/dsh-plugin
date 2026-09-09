@@ -39,6 +39,15 @@ repo:`Tabbit-Browser/dsh-tabbit`.
 - `scripts/sync-to-browser.sh` rsyncs the built package into the tab-browser
   checkout for the preinstalled (vendored) form; run it after a build when
   updating the browser-side copy.
+- Never `session.append` a plugin-defined event type. DSH's persistence layer
+  refuses to read a session log containing any event type outside its
+  generated `KNOWN_SESSION_EVENT_TYPES` unless that stored envelope carries
+  `ignorable: true`, and `Session.append` gives a plugin no way to set that
+  marker — so one such event makes the whole session unopenable on cold load
+  (issue #22: the `tabbit/status` event `/tabbit-info` wrote through 0.3.3).
+  Until the host exposes an `ignorable` channel, persist nothing but events
+  the host itself defines — e.g. return text from a command handler and let
+  `command/done` carry it.
 
 ## Release process
 

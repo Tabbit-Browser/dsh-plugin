@@ -472,27 +472,6 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/*
- * /tabbit-info 结果的持久载体：整值、log-only 的会话事件（声明合并进
- * dsh 的 SessionEventMap，同 dsh-commands 声明 command/run 的做法；新增
- * 事件类型不需要日志格式版本号——旧运行时按 ignorable 词汇增长忽略它）。
- *
- * 为什么结果要落事件而不是只放进 CommandResult.text：dsh 的 web 客户端把
- * command/run+command/done 折成的命令行节点视为“控制面内容”，【不会】让
- * 空白会话脱离引导页——命令的 text 在空白会话里根本不渲染。而一条非
- * command 的领域事件会折成普通聊天节点，激活会话视图，结果即时可见、且
- * 刷新/重开后照常回放。命令返回值里带 sourceEventSeq 把两者关联起来
- * （dsh CommandResult 的标准姿势，/compact 同款）。
- *
- * 结论行与明细分开存：结论（跟随用户语言）常显在状态卡上，明细
- * （英文技术格式）展开才见。log-only 意味着它不进模型消息、不占上下文。
- */
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    'tabbit/status': { at: number; conclusion: string; report: string };
-  }
-}
-
 const MAX_LABEL_LENGTH = 48;
 
 /*
@@ -749,20 +728,17 @@ export function apply(ctx: Context): void {
     commandCtx.commands.register({
       name: 'tabbit-info',
       description: 'Show Tabbit Browser integration status: launcher, instances, tasks, permissions.',
-      handler: async ({ agent }) => {
+      handler: async () => {
         try {
           const report = await renderStatus(service, readLocalePreference(ctx.settings));
-          const newline = report.indexOf('\n');
-          const conclusion = newline === -1 ? report : report.slice(0, newline);
-          // 先落 tabbit/status 事件再返回：web 客户端把它折成常显的状态卡
-          // （见 client/client.js），命令行节点只保留结论摘要。sourceEventSeq
-          // 指回这条事件，是 dsh 关联命令生命周期与领域投影的标准字段。
-          const event = agent.session.append('tabbit/status', {
-            at: Date.now(),
-            conclusion,
-            report,
-          });
-          return { kind: 'success', text: conclusion, sourceEventSeq: event.seq };
+          // 整份报告只放进 CommandResult.text，由宿主落成它自己认识的
+          // command/done 事件。【不要】改回 session.append 自定义事件类型：
+          // 宿主持久层对不认识的事件类型只认信封上的 ignorable 标记，而
+          // Session.append 没有设置该标记的入口——0.3.3 及之前落下的
+          // tabbit/status 事件让整个会话在冷加载时被拒读（issue #22）。宿主
+          // 提供 ignorable 通道前，本插件不得向会话日志追加任何自定义事件
+          // 类型（见 AGENTS.md）。
+          return { kind: 'success', text: report };
         } catch (error) {
           return { kind: 'error', text: `tabbit status failed: ${String((error as Error)?.message ?? error)}` };
         }

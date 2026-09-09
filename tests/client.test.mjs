@@ -1,32 +1,36 @@
 // client/client.js（web 客户端插件）的冒烟测试：模拟宿主的 ModuleLoader
-// 装载协议取出工厂，用假 React 驱动 apply，验证 @tab 输入源与 tabbit-status
-// 聊天节点的注册物形状、事件匹配、视图节点构造和渲染器输出。假 React 只
-// 记录 createElement 调用树，不做真实 DOM。
+// 装载协议取出工厂，用假宿主服务驱动 apply，验证 @tab 输入源的注册，以及
+// 客户端【不再】向宿主注册任何会话节点/聊天插槽（issue #22 的回归守卫：
+// 状态卡曾靠一条自定义会话事件驱动，那条事件会让整个会话冷加载失败）。
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 
-/* 装载一次 client.js 并返回其模块导出（require 只认平台词 'react'）。 */
-function loadClient(fakeReact) {
+/* 装载一次 client.js 并返回其模块导出。客户端零依赖：工厂不应 require 任何东西。 */
+function loadClient() {
   globalThis.window = { __ModuleLoader__: { load: (handoff) => { globalThis.__handoff = handoff } } }
   eval(readFileSync(new URL('../client/client.js', import.meta.url), 'utf8'))
   return globalThis.__handoff.factory((spec) => {
-    if (spec === 'react') return fakeReact
     throw new Error(`unexpected require: ${spec}`)
   })
 }
 
-/* 宿主服务的最小假件：可切换新旧会话 API，记录真实的注册结果。 */
-function mockServices({ registeredNodes, slotRegistrations, sources, conversationApi = 'new' }) {
+/*
+ * 宿主服务的最小假件。刻意把两代会话节点服务和 slots 都摆出来：客户端
+ * 不该碰它们中的任何一个——requested 记录 ctx.get 被问过哪些服务，
+ * registeredNodes / slotRegistrations 记录真实的注册结果。
+ */
+function mockServices({ requested, registeredNodes, slotRegistrations, sources, withInputTriggers = true }) {
   return {
     get(name) {
-      if (name === 'inputTriggers') {
+      requested.push(name)
+      if (name === 'inputTriggers' && withInputTriggers) {
         return { registerSource: (source) => { sources.push(source); return () => {} } }
       }
-      if (name === 'uiConversation' && conversationApi === 'new') {
+      if (name === 'uiConversation') {
         return { events: { register: (definition) => { registeredNodes.push(definition); return () => {} } } }
       }
-      if (name === 'conversationEvents' && conversationApi === 'old') {
+      if (name === 'conversationEvents') {
         return { register: (definition) => { registeredNodes.push(definition); return () => {} } }
       }
       if (name === 'slots') {
@@ -41,101 +45,32 @@ function mockServices({ registeredNodes, slotRegistrations, sources, conversatio
   }
 }
 
-test('registers the @tab source and the tabbit-status chat node', () => {
-  const fakeReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: () => [false, () => {}] }
-  const client = loadClient(fakeReact)
+test('registers the @tab source and nothing else', () => {
+  const client = loadClient()
   assert.equal(client.name, 'dsh-tabbit-client')
-  assert.deepEqual(client.inject, ['inputTriggers', 'slots'])
+  assert.deepEqual(client.inject, ['inputTriggers'])
 
+  const requested = []
   const registeredNodes = []
   const slotRegistrations = []
   const sources = []
-  client.apply(mockServices({ registeredNodes, slotRegistrations, sources }))
+  client.apply(mockServices({ requested, registeredNodes, slotRegistrations, sources }))
 
   assert.equal(sources.length, 1)
-  assert.equal(registeredNodes.length, 1)
-  assert.equal(slotRegistrations.length, 1)
+  assert.equal(typeof sources[0].name, 'string')
 
-  const node = registeredNodes[0]
-  assert.equal(node.kind, 'tabbit-status')
-  assert.equal(node.target, 'chat')
-
-  // match：只认 tabbit/status；单事件业务，event.seq 即节点身份。
-  assert.equal(node.match({ type: 'command/run', data: {} }), null)
-  assert.deepEqual(
-    node.match({ type: 'tabbit/status', seq: 7, data: { conclusion: 'c', report: 'r' } }),
-    { id: '7', role: 'start' },
-  )
-
-  // start/buildViewNode：整值载荷透传为 state，锚点与 location 取自事件。
-  const start = { event: { type: 'tabbit/status', seq: 7, data: { conclusion: 'c', report: 'r' } }, location: { kind: 'session' } }
-  assert.deepEqual(node.start(undefined, start), { conclusion: 'c', report: 'r' })
-  const view = node.buildViewNode({ key: 'k1', id: '7', state: start.event.data, start })
-  assert.equal(view.kind, 'tabbit-status')
-  assert.equal(view.anchorSeq, 7)
-  assert.equal(view.location.kind, 'session')
-  assert.equal(view.visibility, 'visible')
-
-  // 渲染器：keyed 插槽声明 + 组件能渲染出卡片结构。
-  assert.equal(slotRegistrations[0].slot, 'conversation.chat.node')
-  const seat = slotRegistrations[0].callback()
-  assert.equal(seat.spec.key, 'tabbit-status')
-})
-
-test('registers the status node through the DSH 0.1.1 conversationEvents service', () => {
-  const fakeReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: () => [false, () => {}] }
-  const client = loadClient(fakeReact)
-  const registeredNodes = []
-  const slotRegistrations = []
-  const sources = []
-
-  client.apply(mockServices({
-    registeredNodes, slotRegistrations, sources, conversationApi: 'old',
-  }))
-
-  assert.equal(sources.length, 1)
-  assert.equal(registeredNodes.length, 1)
-  assert.equal(registeredNodes[0].kind, 'tabbit-status')
-  assert.equal(slotRegistrations.length, 1)
-})
-
-test('keeps @tab active when no conversation status-card service exists', () => {
-  const fakeReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: () => [false, () => {}] }
-  const client = loadClient(fakeReact)
-  const registeredNodes = []
-  const slotRegistrations = []
-  const sources = []
-
-  client.apply(mockServices({
-    registeredNodes, slotRegistrations, sources, conversationApi: 'none',
-  }))
-
-  assert.equal(sources.length, 1)
+  // issue #22 回归守卫：不注册会话节点、不占聊天插槽，也不去探测那几个服务。
   assert.equal(registeredNodes.length, 0)
   assert.equal(slotRegistrations.length, 0)
+  assert.deepEqual(requested, ['inputTriggers'])
 })
 
-test('renders the status card with a language-following details toggle', () => {
-  const fakeReact = { createElement: (type, props, ...children) => ({ type, props, children }), useState: () => [false, () => {}] }
-  const client = loadClient(fakeReact)
-  const seat = (() => {
-    const slotRegistrations = []
-    client.apply(mockServices({
-      registeredNodes: [], slotRegistrations, sources: [],
-    }))
-    return slotRegistrations[0].callback()
-  })()
-
-  // 中文结论（⚠️ 前缀）：卡片描边转警示色、按钮文案跟随中文。
-  const zh = seat.view({ node: { data: { conclusion: '⚠️ 未找到 Tabbit 浏览器', report: 'instances: none registered' } } })
-  assert.equal(zh.type, 'div')
-  assert.equal(zh.props.style.borderColor, '#d4a72c')
-  assert.equal(zh.children[0].children[0], '⚠️ 未找到 Tabbit 浏览器')
-  assert.equal(zh.children[1].type, 'button')
-  assert.equal(zh.children[1].children[0].startsWith('明细'), true)
-
-  // 英文结论：默认描边、按钮文案英文。
-  const en = seat.view({ node: { data: { conclusion: '✅ Tabbit integration OK', report: 'instances: 1' } } })
-  assert.notEqual(en.props.style.borderColor, '#d4a72c')
-  assert.equal(en.children[1].children[0].startsWith('details'), true)
+test('stays silent when the input-trigger service is missing', () => {
+  const client = loadClient()
+  const requested = []
+  const sources = []
+  client.apply(mockServices({
+    requested, registeredNodes: [], slotRegistrations: [], sources, withInputTriggers: false,
+  }))
+  assert.equal(sources.length, 0)
 })

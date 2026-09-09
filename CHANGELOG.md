@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.4
+
+- `/tabbit-info` no longer appends a custom `tabbit/status` event to the
+  session log. DSH refuses to read a session containing an event type it
+  does not know unless that event is marked `ignorable`, and a plugin has no
+  way to set that marker through `Session.append` — so a single
+  `/tabbit-info` run made the whole session unopenable after a restart
+  (https://github.com/Tabbit-Browser/dsh-tabbit/issues/22). The report now
+  travels as ordinary command text; the web client's status card, which was
+  driven by that event, is removed with it. A session already affected can
+  be repaired by adding `"ignorable": true` to each stored `tabbit/status`
+  record.
+
 ## 0.3.3
 
 Requires DSH >= 0.1.1-rc.2.
