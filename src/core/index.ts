@@ -61,11 +61,12 @@ import type { Context } from '@deepseek-ai/cordis';
 // schemastery：dsh 全家桶用的运行时 schema 校验库（惯例以 z 引入，用法类似 zod）。
 import z from '@deepseek-ai/schemastery';
 
+import { readHostVersion } from '../host-version.js';
 import { TabbitClient } from '../runtime/client.js';
 import { listAllTabs, type TabbitTabInventory } from '../runtime/endpoint.js';
 import { TabbitCliError } from '../runtime/errors.js';
 import { defaultLauncherPath, listInstances, type TabbitInstance } from '../runtime/instances.js';
-import { prependUpdateNotice } from '../update-check.js';
+import { checkPluginUpdate, prependUpdateNotice } from '../update-check.js';
 
 // 下面这些 `import type {}` 是 TypeScript 的"类型副作用导入"：不引入任何
 // 运行时代码，只为了让这些包对 Context 接口的类型扩充（declare module）生效，
@@ -622,7 +623,9 @@ async function loadSkillDocument(signal?: AbortSignal) {
  * skill provider 本体：list 列卡片，get 按名取正文。
  * get 返回正文前经 prependUpdateNotice 过一道（../update-check.ts）：有新版
  * 时在正文顶部插一段更新通知（由模型转告用户）；检查失败/无新版/浏览器
- * 托管（预装）形态下原样返回，绝不拖慢或搞坏 skill 加载。
+ * 托管（预装）形态下原样返回，绝不拖慢或搞坏 skill 加载。传入的 checkUpdate
+ * 闭包带上 host-version.ts 读到的当前宿主版本，让"有新版"的判断把宿主兼容性
+ * 也算进去（见 update-check.ts 文件头的宿主兼容性过滤说明）。
  * export 仅为单元测试（tests/plugin.test.mjs 直接调 list/get）。
  */
 export const skillProvider = {
@@ -634,7 +637,10 @@ export const skillProvider = {
   async get(selected: { name: string }, options: { signal?: AbortSignal } = {}) {
     if (selected.name !== SKILL_NAME) return undefined;
     const { candidate, content } = await loadSkillDocument(options.signal);
-    return { ...candidate, content: await prependUpdateNotice(content) };
+    return {
+      ...candidate,
+      content: await prependUpdateNotice(content, () => checkPluginUpdate({ hostVersion: readHostVersion() })),
+    };
   },
 };
 

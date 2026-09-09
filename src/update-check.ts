@@ -21,6 +21,16 @@
  * 本文件是纯逻辑（不依赖任何 dsh 包），两处接线在别的文件：
  *  - core/index.ts 的 skill provider：get() 返回正文前调 prependUpdateNotice；
  *  - installer/index.ts：注册 `tabbit_plugin_update` 工具（记录拒绝/强制重查）。
+ * 两处接线都要把 host-version.ts 读到的当前宿主 DSH 版本，当作
+ * checkPluginUpdate 的 hostVersion 传进来——这一步不能挪进本文件（会破坏
+ * "不依赖任何 dsh 包"），只能由接线点做。
+ *
+ * 【宿主兼容性过滤】：harness 还在 alpha 阶段、会有破坏性更新（背景见
+ * AGENTS.md），npm 的 latest 不代表"当前宿主装得动"。fetchLatestRelease 现在
+ * 不再无脑推荐 npm 报的最新版，而是用 CHANGELOG 里每个版本段声明的
+ * "Requires DSH >= X"（发布约定见 AGENTS.md）挑一个当前宿主版本满足下限的最
+ * 新版本；hostVersion 判不出、或改动没提过新下限时，行为退化成"就是 npm 报
+ * 的最新版"，跟没有这项特性之前完全一致。
  *
  * 【浏览器托管形态的静默】：Tabbit Browser 预装（vendored）形态下插件版本
  * 由浏览器随自身更新管理，若照通知里的 `dsh plugin add` 跑一遍，会把浏览器
@@ -80,6 +90,47 @@ export function compareVersions(left: unknown, right: unknown): -1 | 0 | 1 | und
     if (a !== b) return a > b ? 1 : -1;
   }
   return 0;
+}
+
+/*
+ * 宿主 DSH 版本比较——跟上面的 compareVersions（比插件自己的纯数字版本号）
+ * 分开：DSH 版本形如 "0.1.2-alpha.3"／"0.1.1-rc.2"，真实 tag 历史里出现过
+ * alpha→rc 这种同一 patch 内的跨标签演进（见 AGENTS.md 的发布记录），纯数字
+ * 比较会把它们错误地判成相等。标签成熟度顺序按 HOST_PRERELEASE_ORDER 定义；
+ * 出现表外标签、或任一方解析不出格式 → undefined（不可比，调用方按"不知道，
+ * 不做兼容性过滤"处理，绝不能因为一次解析失败就拦掉正常的更新提示）。
+ */
+const HOST_PRERELEASE_ORDER = ['alpha', 'beta', 'rc'];
+
+function parseHostVersion(value: unknown): { core: number[]; tag?: string; tagSeq?: number } | undefined {
+  const match = String(value ?? '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([A-Za-z]+)\.(\d+))?$/);
+  if (!match) return undefined;
+  const [, major, minor, patch, tag, tagSeq] = match;
+  return {
+    core: [Number(major), Number(minor), Number(patch)],
+    tag: tag?.toLowerCase(),
+    tagSeq: tagSeq !== undefined ? Number(tagSeq) : undefined,
+  };
+}
+
+export function compareHostVersions(left: unknown, right: unknown): -1 | 0 | 1 | undefined {
+  const a = parseHostVersion(left);
+  const b = parseHostVersion(right);
+  if (!a || !b) return undefined;
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] !== b.core[index]) return a.core[index] > b.core[index] ? 1 : -1;
+  }
+  if (a.tag === undefined && b.tag === undefined) return 0;
+  if (a.tag === undefined) return 1; // 正式版比任何预发布版新。
+  if (b.tag === undefined) return -1;
+  if (a.tag !== b.tag) {
+    const aRank = HOST_PRERELEASE_ORDER.indexOf(a.tag);
+    const bRank = HOST_PRERELEASE_ORDER.indexOf(b.tag);
+    if (aRank === -1 || bRank === -1) return undefined; // 表外标签：不可比。
+    return aRank === bRank ? 0 : aRank > bRank ? 1 : -1;
+  }
+  if (a.tagSeq === b.tagSeq) return 0;
+  return (a.tagSeq ?? 0) > (b.tagSeq ?? 0) ? 1 : -1;
 }
 
 /* 压平所有空白（含换行）为单个空格——CHANGELOG 段落要塞进单行通知。 */
@@ -203,6 +254,70 @@ export function changelogSectionFor(markdown: unknown, version: string): string 
   return undefined;
 }
 
+/* 一个 changelog 版本段解析出的元数据：本段【显式】声明的宿主下限。没写
+ * 不代表没要求——是"这版没有把下限进一步抬高"，继承逻辑见
+ * withEffectiveFloors。 */
+export interface ChangelogVersionEntry {
+  version: string;
+  requiresHost?: string;
+}
+
+/*
+ * 按【文件出现顺序】（约定新版本段在前）抠出每个 `## 版本号` 段自己写了什么
+ * 宿主下限——不做继承，如实反映每段内容，继承是 withEffectiveFloors 的职责。
+ * 固定格式（发布流程见 AGENTS.md）：版本段正文里独占一行的
+ * "Requires DSH >= <版本号>."。
+ */
+export function parseChangelogVersions(markdown: unknown): ChangelogVersionEntry[] {
+  const source = String(markdown ?? '');
+  const headingRe = /^## +(v?\d+(?:\.\d+)+).*$/gm;
+  const headings = [...source.matchAll(headingRe)];
+  return headings.map((heading, index) => {
+    const version = numericVersion(heading[1])?.join('.') ?? heading[1];
+    const sectionStart = (heading.index ?? 0) + heading[0].length;
+    const sectionEnd = headings[index + 1]?.index ?? source.length;
+    const body = source.slice(sectionStart, sectionEnd);
+    const required = body.match(/^Requires DSH >= +(\S+)[ \t]*$/mu)?.[1];
+    return { version, requiresHost: required?.replace(/\.$/u, '') };
+  });
+}
+
+/* 把"没写下限"替换成"离它最近的更早版本声明过的下限"（下限只升不降）。 */
+function withEffectiveFloors(entries: readonly ChangelogVersionEntry[]): { version: string; floor?: string }[] {
+  let floor: string | undefined;
+  // entries 是新→旧；从旧往新走才能把"最近一次显式声明"正确地结转给后面没写的版本。
+  const oldestFirst = [...entries].reverse().map(entry => {
+    if (entry.requiresHost !== undefined) floor = entry.requiresHost;
+    return { version: entry.version, floor };
+  });
+  return oldestFirst.reverse();
+}
+
+/*
+ * 在 changelog 全部版本段里，找【当前宿主能跑的、且不比 ceilingVersion
+ * （npm 报的最新版）新】的那个最新版本：
+ *  - hostVersion 缺失（调用方判断不出当前宿主版本）→ 不过滤，原样给
+ *    ceilingVersion（行为等同没有这个特性之前）；
+ *  - 某候选没声明过下限，或下限跟宿主版本不可比（格式解析不出）→ 该候选判不了
+ *    兼容性，不敢当作满足，继续找更旧的一个；
+ *  - 全部候选都不满足/判不了 → undefined（调用方据此退回"没有可推荐的新版"，
+ *    绝不能矬子里拔将军选一个判不了兼容性的版本推给用户）。
+ */
+export function selectCompatibleVersion(
+  entries: readonly ChangelogVersionEntry[],
+  ceilingVersion: string,
+  hostVersion: string | undefined,
+): string | undefined {
+  if (hostVersion === undefined) return ceilingVersion;
+  const candidates = withEffectiveFloors(entries).filter(({ version }) => compareVersions(version, ceilingVersion) !== 1);
+  for (const { version, floor } of candidates) {
+    if (floor === undefined) return version;
+    const cmp = compareHostVersions(hostVersion, floor);
+    if (cmp !== undefined && cmp !== -1) return version;
+  }
+  return undefined;
+}
+
 /* 一次发布的元数据（changelog 缺失 = 只有版本、没有变更摘要）。 */
 export interface LatestRelease {
   version: string;
@@ -218,15 +333,22 @@ export interface FetchLatestReleaseOptions {
   fetchImpl?: typeof fetch;
   /* 已装版本：不比它新就跳过变更说明请求（多数日子只发一个请求）。 */
   currentVersion?: string;
+  /* 当前宿主 DSH 版本；缺失 = 不做兼容性过滤，行为等同没有这项特性
+   * （见 selectCompatibleVersion）。 */
+  hostVersion?: string;
 }
 
 /*
  * 取最新发布：
  *  1. 问 npm registry latest 清单拿版本号（版本真相，失败即整个检查失败、
  *     进入 24h 退避）；
- *  2. 只有确认比已装新，才去 jsdelivr 拉【该版本锚定】的 CHANGELOG.md 抠
- *     对应段落——这步任何失败都只降级为"无摘要"，绝不挡升级提示（jsdelivr
- *     在部分网络环境下可达性弱于 registry，不能让它拖垮主通道）。
+ *  2. 只有确认比已装新，才去 jsdelivr 拉锚定该版本的 CHANGELOG.md 全文——
+ *     这步任何失败都只降级为"无摘要"，绝不挡升级提示（jsdelivr 在部分网络
+ *     环境下可达性弱于 registry，不能让它拖垮主通道）；
+ *  3. 全文（不只是 npm 报的那个版本段）拿去 selectCompatibleVersion 挑一个
+ *     当前宿主真正跑得动的版本——可能就是 npm 报的最新版，也可能是更旧的一
+ *     个（宿主太老、追不上最新版的宿主下限时）；一个都追不上就退回已装版本
+ *     （= 没有可推荐的更新，绝不矬子里拔将军推一个大概率跑不动的版本）。
  */
 export async function fetchLatestRelease({
   manifestUrl = process.env.TABBIT_PLUGIN_UPDATE_URL || DEFAULT_MANIFEST_URL,
@@ -234,17 +356,22 @@ export async function fetchLatestRelease({
   timeoutMs = FETCH_TIMEOUT_MS,
   fetchImpl = fetch,
   currentVersion,
+  hostVersion,
 }: FetchLatestReleaseOptions = {}): Promise<LatestRelease> {
   const manifest = JSON.parse(await fetchTextWithTimeout(manifestUrl, timeoutMs, fetchImpl)) as { version?: unknown };
-  const version = typeof manifest.version === 'string' ? manifest.version.trim() : '';
-  if (numericVersion(version) === undefined) throw new Error('npm manifest has no usable version.');
-  if (currentVersion !== undefined && compareVersions(version, currentVersion) !== 1) return { version };
+  const npmVersion = typeof manifest.version === 'string' ? manifest.version.trim() : '';
+  if (numericVersion(npmVersion) === undefined) throw new Error('npm manifest has no usable version.');
+  if (currentVersion !== undefined && compareVersions(npmVersion, currentVersion) !== 1) return { version: npmVersion };
+  let changelogText: string;
   try {
-    const changelog = changelogSectionFor(await fetchTextWithTimeout(changelogUrlFor(version), timeoutMs, fetchImpl), version);
-    return changelog !== undefined ? { version, changelog } : { version };
+    changelogText = await fetchTextWithTimeout(changelogUrlFor(npmVersion), timeoutMs, fetchImpl);
   } catch {
-    return { version };
+    return { version: npmVersion };
   }
+  const picked = selectCompatibleVersion(parseChangelogVersions(changelogText), npmVersion, hostVersion);
+  const version = picked ?? currentVersion ?? npmVersion;
+  const changelog = changelogSectionFor(changelogText, version);
+  return changelog !== undefined ? { version, changelog } : { version };
 }
 
 function isRecent(timestamp: unknown, now: number): boolean {
@@ -294,20 +421,22 @@ function summaryFromCache(currentVersion: string | undefined, cached: UpdateChec
 
 async function fetchAndCacheRelease({
   currentVersion,
+  hostVersion,
   cached,
   cacheFile,
   now,
   fetchRelease,
 }: {
   currentVersion: string | undefined;
+  hostVersion: string | undefined;
   cached: UpdateCheckCache;
   cacheFile: string;
   now: number;
-  fetchRelease: (context: { currentVersion?: string }) => Promise<LatestRelease>;
+  fetchRelease: (context: { currentVersion?: string; hostVersion?: string }) => Promise<LatestRelease>;
 }): Promise<UpdateSummary> {
   const state: UpdateCheckCache = { ...cached, lastAttemptAt: now };
   try {
-    const release = await fetchRelease({ currentVersion });
+    const release = await fetchRelease({ currentVersion, hostVersion });
     state.checkedAt = now;
     state.latestVersion = release.version;
     // 有意整体覆盖（包括写入 undefined→序列化时丢弃）：旧版本的摘要绝不能
@@ -327,8 +456,12 @@ async function fetchAndCacheRelease({
 export interface CheckPluginUpdateOptions {
   now?: number;
   cacheFile?: string;
-  fetchRelease?: (context: { currentVersion?: string }) => Promise<LatestRelease>;
+  fetchRelease?: (context: { currentVersion?: string; hostVersion?: string }) => Promise<LatestRelease>;
   readVersion?: () => Promise<string | undefined>;
+  /* 当前宿主 DSH 版本；缺失 = 不做兼容性过滤。跟 latestVersion/changelog 一样
+   * 走 24h 缓存——宿主版本在这 24 小时内变了，最坏情况是晚一天才反映，跟这个
+   * 文件"每天最多查一轮"的既有取舍一致，不单独为它加请求。 */
+  hostVersion?: string;
   /* true = 跳过日缓存与失败退避，立即重查（tabbit_plugin_update 的 refresh）。 */
   force?: boolean;
 }
@@ -344,6 +477,7 @@ export async function checkPluginUpdate({
   cacheFile = defaultCacheFile(),
   fetchRelease = fetchLatestRelease,
   readVersion = readLocalVersion,
+  hostVersion,
   force = false,
 }: CheckPluginUpdateOptions = {}): Promise<UpdateSummary> {
   const currentVersion = await readVersion();
@@ -356,7 +490,7 @@ export async function checkPluginUpdate({
       return { status: 'unknown', currentVersion };
     }
   }
-  return fetchAndCacheRelease({ currentVersion, cached, cacheFile, now, fetchRelease });
+  return fetchAndCacheRelease({ currentVersion, hostVersion, cached, cacheFile, now, fetchRelease });
 }
 
 /* 记录"用户拒绝了这个版本"（skill 从此不再announce它；更新的版本出现才再提）。 */

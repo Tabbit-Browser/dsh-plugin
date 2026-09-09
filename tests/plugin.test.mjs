@@ -163,7 +163,12 @@ test('reports the update state and honors refresh through the update tool', asyn
   assert.equal(result.status, 'update-available')
   assert.equal(result.latestVersion, '0.4.0')
   assert.match(result.message, /Ask the user whether to update now/)
-  assert.deepEqual(calls, [{ force: true }])
+  // hostVersion is whatever host-version.ts resolves live off the linked harness
+  // checkout — assert its shape, not its exact value, so this test doesn't break
+  // every time a developer points .dsh-harness at a newer checkout.
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].force, true)
+  assert.match(calls[0].hostVersion, /^\d+\.\d+\.\d+/)
 })
 
 test('the update tool defers to the browser for managed (preinstalled) copies', async () => {

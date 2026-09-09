@@ -51,6 +51,7 @@ import {
   type DetectedInstallation,
 } from './detect.js';
 import { createDownloadJob } from './download.js';
+import { readHostVersion } from '../host-version.js';
 import { checkPluginUpdate, dismissUpdate, isBrowserManagedInstall, messageForUpdate } from '../update-check.js';
 
 import type {} from '../core/index.js';
@@ -258,6 +259,8 @@ export function registerInstallerTool(ctx: Context, overrides: InstallerToolOver
  *   - 插件刚更新完 / 网络恢复了 → refresh 跳过日缓存立即重查。
  * 浏览器托管（预装）形态下版本归浏览器管：直接返回 browser-managed，
  * 不发请求也不给 dsh plugin add 建议（照做会把托管安装覆盖成 npm 版）。
+ * checkUpdate 调用时带上 host-version.ts 读到的当前宿主版本，"有没有新版"
+ * 的判断会把宿主兼容性算进去（见 update-check.ts 的宿主兼容性过滤说明）。
  * overrides 同样仅为单元测试（假 checkUpdate/dismiss/env）。
  */
 export interface UpdateToolOverrides {
@@ -309,7 +312,7 @@ export function registerUpdateTool(ctx: Context, overrides: UpdateToolOverrides 
           dismissedVersion: args.dismiss,
         };
       }
-      const update = await checkUpdate({ force: args.refresh === true });
+      const update = await checkUpdate({ force: args.refresh === true, hostVersion: readHostVersion() });
       return {
         status: update.status,
         message: messageForUpdate(update),

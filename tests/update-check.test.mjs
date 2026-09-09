@@ -8,15 +8,18 @@ import { join } from 'node:path'
 import {
   changelogSectionFor,
   checkPluginUpdate,
+  compareHostVersions,
   compareVersions,
   dismissUpdate,
   fetchLatestRelease,
   formatUpdateNotice,
   isBrowserManagedInstall,
   messageForUpdate,
+  parseChangelogVersions,
   parseLatestChangelog,
   prependUpdateNotice,
   readCachedCheck,
+  selectCompatibleVersion,
   summarizeUpdate,
   truncateChangelog,
 } from '../lib/update-check.js'
@@ -48,6 +51,21 @@ test('compares dotted numeric versions', () => {
   assert.equal(compareVersions('v0.3.0', '0.2.3'), 1)
   assert.equal(compareVersions('0.2', '0.2.1'), -1)
   assert.equal(compareVersions('garbage', '0.2.0'), undefined)
+})
+
+test('compares host DSH versions, including cross-tag prerelease ordering', () => {
+  assert.equal(compareHostVersions('0.1.2-alpha.3', '0.1.2-alpha.3'), 0)
+  assert.equal(compareHostVersions('0.1.2-alpha.1', '0.1.2-alpha.3'), -1)
+  // 补丁号不同：不看 tag，纯数字比较已经能定序（真实 tag 历史里 0.1.1-rc.2 → 0.1.2-alpha.1 就是这样）。
+  assert.equal(compareHostVersions('0.1.1-rc.2', '0.1.2-alpha.1'), -1)
+  // 同一补丁号内跨标签：按成熟度表排序，不是按字母序巧合。
+  assert.equal(compareHostVersions('0.1.2-alpha.3', '0.1.2-rc.1'), -1)
+  assert.equal(compareHostVersions('0.1.2-rc.1', '0.1.2-beta.1'), 1)
+  // 正式版比任何预发布版新。
+  assert.equal(compareHostVersions('0.1.2', '0.1.2-rc.9'), 1)
+  // 表外标签、或解析不出格式：不可比。
+  assert.equal(compareHostVersions('0.1.2-nightly.1', '0.1.2-alpha.1'), undefined)
+  assert.equal(compareHostVersions('not-a-version', '0.1.2-alpha.1'), undefined)
 })
 
 test('flattens and truncates release notes', () => {
@@ -275,12 +293,127 @@ test('skips or degrades the changelog request without blocking the version', asy
   )
 })
 
+test('fetchLatestRelease recommends an older version the host can actually run', async () => {
+  const changelog = [
+    '## 0.4.0',
+    '',
+    'Requires DSH >= 0.2.0.',
+    '',
+    '- Needs a host feature only 0.2.0+ hosts have.',
+    '',
+    '## 0.3.0',
+    '',
+    '- Old but fine on any host.',
+  ].join('\n')
+  const fetchImpl = async url => (url === 'manifest'
+    ? { ok: true, text: async () => JSON.stringify({ version: '0.4.0' }) }
+    : { ok: true, text: async () => changelog })
+  // 宿主够格拿 0.4.0：跟没有这项特性之前一样。
+  const upToDate = await fetchLatestRelease({
+    manifestUrl: 'manifest', changelogUrlFor: () => 'changelog', fetchImpl,
+    currentVersion: '0.2.0', hostVersion: '0.2.0',
+  })
+  assert.deepEqual(upToDate, {
+    version: '0.4.0',
+    changelog: 'Requires DSH >= 0.2.0. - Needs a host feature only 0.2.0+ hosts have.',
+  })
+  // 宿主追不上 0.4.0 的下限：退到 0.3.0，而不是无脑给 npm 报的最新版。
+  const downgraded = await fetchLatestRelease({
+    manifestUrl: 'manifest', changelogUrlFor: () => 'changelog', fetchImpl,
+    currentVersion: '0.2.0', hostVersion: '0.1.0',
+  })
+  assert.deepEqual(downgraded, { version: '0.3.0', changelog: '- Old but fine on any host.' })
+  // 宿主版本没传：不过滤，行为跟没有这项特性之前完全一致。
+  const unfiltered = await fetchLatestRelease({
+    manifestUrl: 'manifest', changelogUrlFor: () => 'changelog', fetchImpl,
+    currentVersion: '0.2.0',
+  })
+  assert.deepEqual(unfiltered, {
+    version: '0.4.0',
+    changelog: 'Requires DSH >= 0.2.0. - Needs a host feature only 0.2.0+ hosts have.',
+  })
+  // 宿主比任何声明过的下限都老：不能推荐会跑不动的版本，退回已装版本。
+  const allRequireNewerHost = [
+    '## 0.4.0',
+    '',
+    'Requires DSH >= 0.2.0.',
+    '',
+    '- Needs a host feature only 0.2.0+ hosts have.',
+    '',
+    '## 0.3.0',
+    '',
+    'Requires DSH >= 0.1.0.',
+    '',
+    '- Needs an older, but still nonzero, host feature.',
+  ].join('\n')
+  const noUpdate = await fetchLatestRelease({
+    manifestUrl: 'manifest',
+    changelogUrlFor: () => 'changelog',
+    currentVersion: '0.2.5',
+    hostVersion: '0.0.1',
+    fetchImpl: async url => (url === 'manifest'
+      ? { ok: true, text: async () => JSON.stringify({ version: '0.4.0' }) }
+      : { ok: true, text: async () => allRequireNewerHost }),
+  })
+  assert.deepEqual(noUpdate, { version: '0.2.5' })
+})
+
 test('extracts the changelog section for an exact version', () => {
   const md = '# Changelog\n\n## 0.4.0\n\n- Newest.\n\n## 0.3.0\n\n- Target\n  entry.\n'
   assert.equal(changelogSectionFor(md, '0.3.0'), '- Target entry.')
   assert.equal(changelogSectionFor(md, '0.4.0'), '- Newest.')
   assert.equal(changelogSectionFor(md, '0.5.0'), undefined)
   assert.equal(changelogSectionFor('no headings here', '0.3.0'), undefined)
+})
+
+test('parses the Requires DSH >= line per changelog section, without inheriting', () => {
+  const markdown = [
+    '## 0.3.2',
+    '',
+    '- No new host requirement.',
+    '',
+    '## 0.3.1',
+    '',
+    'Requires DSH >= 0.1.2-alpha.1.',
+    '',
+    '- Some change.',
+    '',
+    '## 0.3.0',
+    '',
+    '- Predates the convention.',
+  ].join('\n')
+  assert.deepEqual(parseChangelogVersions(markdown), [
+    { version: '0.3.2', requiresHost: undefined },
+    { version: '0.3.1', requiresHost: '0.1.2-alpha.1' },
+    { version: '0.3.0', requiresHost: undefined },
+  ])
+})
+
+test('selects the newest version whose inherited host floor the current host satisfies', () => {
+  const entries = [
+    { version: '0.3.2' }, // 没写：继承 0.3.1 的 0.1.2-alpha.1。
+    { version: '0.3.1', requiresHost: '0.1.2-alpha.1' },
+    { version: '0.3.0', requiresHost: '0.1.2-alpha.1' },
+    { version: '0.2.3' }, // 更旧、且早于任何声明：视为无要求。
+  ]
+  // 宿主满足最新版的（继承来的）下限：直接给最新版。
+  assert.equal(selectCompatibleVersion(entries, '0.3.2', '0.1.2-alpha.3'), '0.3.2')
+  // 宿主够不上 0.3.x 那条下限，但够老版本：退到 0.2.3。
+  assert.equal(selectCompatibleVersion(entries, '0.3.2', '0.1.1-rc.2'), '0.2.3')
+  // 宿主版本判不出：不过滤，原样给 ceilingVersion（跟没有这项特性之前一致）。
+  assert.equal(selectCompatibleVersion(entries, '0.3.2', undefined), '0.3.2')
+  // 宿主版本字符串本身解析不出（不可比）：该候选判不了，一路找到无要求的最旧版。
+  assert.equal(selectCompatibleVersion(entries, '0.3.2', 'not-a-version'), '0.2.3')
+  // ceilingVersion 比 npm 报的还旧：只看 <= ceiling 的候选。
+  assert.equal(selectCompatibleVersion(entries, '0.3.0', '0.1.2-alpha.3'), '0.3.0')
+})
+
+test('reports no compatible version when the host is older than every declared floor', () => {
+  const entries = [
+    { version: '0.3.1', requiresHost: '0.1.2-alpha.1' },
+    { version: '0.3.0', requiresHost: '0.1.2-alpha.1' },
+  ]
+  assert.equal(selectCompatibleVersion(entries, '0.3.1', '0.1.0-rc.7'), undefined)
 })
 
 test('formats the notice from local template data only', () => {

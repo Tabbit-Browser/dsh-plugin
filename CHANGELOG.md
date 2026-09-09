@@ -2,6 +2,8 @@
 
 ## 0.3.3
 
+Requires DSH >= 0.1.1-rc.2.
+
 - Restored web-client compatibility with DSH `0.1.1-rc.2`. The client no
   longer hard-injects either generation of the conversation service: it uses
   `uiConversation.events` on DSH `0.1.2-alpha.1+` and falls back to
@@ -30,6 +32,8 @@
 
 ## 0.3.1
 
+Requires DSH >= 0.1.2-alpha.1.
+
 - Fixed the web client plugin never activating on current DSH hosts — the web
   UI showed `dsh-tabbit: pending (waiting for service: conversationEvents)`.
   The DSH client runtime refactor (already part of `0.1.2-alpha.1`) renamed the
@@ -42,6 +46,8 @@
   `buildViewNode`) are unchanged.
 
 ## 0.3.0
+
+Requires DSH >= 0.1.2-alpha.1.
 
 - Major upgrade: browser automation now runs through the native
   `tabbit_browser` tool — real Playwright code executing in the user's Tabbit
@@ -104,10 +110,10 @@
   state, the page-access/intranet permission gates, and the browser's proxy
   environment (the built-in fetcher connects directly to resolved public IPs
   and refuses every domain on fake-ip proxy setups).
-- Requires DSH `0.1.2-alpha.1` or newer, whose standard agent preset ships
-  with `web_fetch` enabled — the bundled "Tabbit mode" preset is gone, and
-  plugin activation removes a previously installed managed copy (marker
-  protocol respected: user-owned copies are never touched).
+- The standard agent preset now ships with `web_fetch` enabled — the bundled
+  "Tabbit mode" preset is gone, and plugin activation removes a previously
+  installed managed copy (marker protocol respected: user-owned copies are
+  never touched).
 
 ## 0.2.3
 

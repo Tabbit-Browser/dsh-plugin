@@ -49,6 +49,17 @@ npm version and GitHub Release must stay in lockstep:
    their update notice — front-load the message. `CHANGELOG.md` must stay in
    the `files` whitelist: the update check serves release notes from the
    published tarball.
+   - If this release depends on harness behavior that didn't exist on the
+     previously-required floor (i.e. the `peerDependencies` floor in
+     `package.json` needs to move, not just get a routine bump), add a line
+     `Requires DSH >= X.Y.Z-tag.N.` as the entry's first line, before the
+     bullet list. `update-check.ts`'s host-compatibility filter
+     (`selectCompatibleVersion`) parses this exact format out of every
+     section of the published `CHANGELOG.md` to avoid offering installs on
+     an older DSH host a plugin version their host can't actually run — a
+     release without this line is assumed to need no higher a floor than the
+     nearest earlier release that stated one (floors only rise). Omit the
+     line entirely when this release doesn't raise the floor.
 2. `npm test` — all tests must pass.
 3. Commit (`chore: release X.Y.Z`) and push to `main`.
 4. `npm publish` (runs `prepack` → build). **Publishing IS the update channel
