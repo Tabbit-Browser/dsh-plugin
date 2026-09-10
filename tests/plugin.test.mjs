@@ -244,6 +244,10 @@ test('/tabbit-info 把整份报告放进命令结果文本，不向会话日志�
     // 命令文本就是整份报告：首行结论（跟随用户语言），后面跟英文明细。
     assert.match(result.text, /^\u26a0\ufe0f Tabbit Browser not found/u)
     assert.match(result.text, /\ninstances: none registered/u)
+    // 明细第一行是插件版本（本包 package.json）；宿主版本能读到时跟在同一行。
+    const versionLine = result.text.split('\n')[2]
+    assert.match(versionLine, /^plugin: dsh-tabbit \d+\.\d+\.\d+/u)
+    assert.match(versionLine, / · host dsh \d+\.\d+\.\d+/u)
   } finally {
     if (savedHome === undefined) delete process.env.HOME
     else process.env.HOME = savedHome

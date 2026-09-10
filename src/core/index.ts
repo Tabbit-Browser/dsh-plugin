@@ -66,7 +66,7 @@ import { TabbitClient } from '../runtime/client.js';
 import { listAllTabs, type TabbitTabInventory } from '../runtime/endpoint.js';
 import { TabbitCliError } from '../runtime/errors.js';
 import { defaultLauncherPath, listInstances, type TabbitInstance } from '../runtime/instances.js';
-import { checkPluginUpdate, prependUpdateNotice } from '../update-check.js';
+import { checkPluginUpdate, prependUpdateNotice, readLocalVersion } from '../update-check.js';
 
 // 下面这些 `import type {}` 是 TypeScript 的"类型副作用导入"：不引入任何
 // 运行时代码，只为了让这些包对 Context 接口的类型扩充（declare module）生效，
@@ -807,8 +807,16 @@ function statusConclusion(
 
 /*
  * /tabbit-info 命令的输出渲染：首行结论（跟随用户语言），空行，然后是
- * launcher 状态、实例列表（在线/选中标记 + 多实例提示）、生效实例及来源、
+ * 插件与宿主版本、实例列表（在线/选中标记 + 多实例提示）、生效实例及来源、
  * 观看实例、权限设置、任务占用表。
+ *
+ * 版本行放明细第一行：排障时第一个要确认的就是"跑的到底是哪个版本"——
+ * dsh profile 里 link 到本地 checkout、装了多份、改了声明没重新 install 等
+ * 情况下，"以为在跑的版本"和"实际加载的版本"经常不是一回事（真机踩过：
+ * package.json 已改指新 checkout，node_modules 里的符号链接还指着旧仓库）。
+ * 插件版本来自本包 package.json（update-check.ts 的 readLocalVersion），宿主
+ * 版本来自 host-version.ts；任一读不到就如实标 unknown / 省略，绝不因此让
+ * 整份报告失败。
  */
 async function renderStatus(service: TabbitService, locale: 'zh' | 'en'): Promise<string> {
   const settings = service.currentSettings();
@@ -816,6 +824,10 @@ async function renderStatus(service: TabbitService, locale: 'zh' | 'en'): Promis
   const lines: string[] = [];
   lines.push(statusConclusion(service, settings, launcher, locale));
   lines.push('');
+
+  const pluginVersion = (await readLocalVersion()) ?? '(version unknown)';
+  const hostVersion = readHostVersion();
+  lines.push(`plugin: dsh-tabbit ${pluginVersion}${hostVersion !== undefined ? ` · host dsh ${hostVersion}` : ''}`);
 
   const instances = service.instances();
   if (instances.length === 0) {

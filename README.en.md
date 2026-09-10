@@ -20,7 +20,7 @@ benchmarks.
 | Dedicated "page access" permission | Full permission controls. Because dsh shares the user's cookies when it reaches Tabbit pages, it confirms `pageAccess` (asked once per session by default) and `intranetFetch` (per-request approval when `web_fetch` targets an intranet address). |
 | `tabbit_browser_install` tool | Environment preflight: detects an installed stable Tabbit build and verifies the launcher and Runtime Service; downloads Tabbit as a dsh background job when it's missing or outdated. |
 | `tabbit_plugin_update` tool | Plugin update check: asks npm for the latest release at most once a day, and silently installs a suitable version in the background. |
-| `/tabbit-info` command | Type `/tabbit-info` in the dsh input box for diagnostics: launcher, instance list (with product names), effective instance and its source, permission settings, task occupancy. |
+| `/tabbit-info` command | Type `/tabbit-info` in the dsh input box for diagnostics: plugin and host DSH versions, launcher, instance list (with product names), effective instance and its source, permission settings, task occupancy. |
 | `tabbit` skill | Teaches the model best practices for using Tabbit. Defaults to Tabbit's own official skill at `~/.agents/skills/tabbit/` (it evolves with the browser runtime); this plugin bundles a fallback copy. |
 
 ## Installation

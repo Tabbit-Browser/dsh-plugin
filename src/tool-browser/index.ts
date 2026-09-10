@@ -215,7 +215,7 @@ export function apply(ctx: Context): void {
             "Close this task after this call: it stops appearing in the task list and (unless keep_tabs) its tab group closes. Set this on your LAST call for a piece of work whose browser state doesn't need to survive — judge by the task's nature: a one-off lookup or a completed multi-step job, yes; something the user might reasonably continue in the same browser context next message, no (leave unset).",
         },
         // keep_tabs：配合 finish 用。true = 只摘掉任务追踪、标签页留在浏览器里
-        // （对应 CLI 的 --keep；真机验证过 closedTabIds 为空数组）。
+        // （旧 CLI 对应 --keep；新版的缺省保留语义由 finishTask 兼容）。
         // 典型场景：任务里有用户自己指来的标签页（关了会吓到用户）。
         keep_tabs: {
           type: 'boolean',

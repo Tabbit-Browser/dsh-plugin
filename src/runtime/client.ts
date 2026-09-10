@@ -25,7 +25,7 @@
  *  - 整机最多 8 个并发任务；单次求值超时的可接受区间两代不同，见
  *    EVAL_TIMEOUT_FLOOR_MS / EVAL_TIMEOUT_CEILING_MS 的注释；
  *  - 本客户端用到的 CLI 动词：`nodejs`（求值，创建时可带 --claim-tab）、
- *    `finish`（结束任务，keep 语义两代有别，见 finishTask 注释）、
+ *    `finish`（结束任务，keep 语义随 CLI 代际变化，见 finishTask 注释）、
  *    `receipt`（查回执）、`checkpoint`（检查点）、`resource`（分块读资源）、
  *    `diagnose`（诊断快照；1.13.20+ 用它的 tasks 字段列任务，旧代仍用
  *    `tasks` 子命令，见 listTasks()）、`claim`（对已存在的任务追加认领标签页，见
@@ -451,16 +451,14 @@ export class TabbitClient {
   /*
    * 结束一个任务（`finish` 命令）。
    *
-   * ── keep 语义的两代差异与本实现的策略（2026-08-28 按新语义适配）──────
-   * 新代 Runtime（本机稳定/Dev 的 1.11.16+ CLI 源码实证）：
-   *   `finish` 缺省【保留】标签页与可恢复组（keep:true），`--discard` 才
-   *   关闭；`--keep --discard` 同传报错。
-   * 旧代（≤1.11.13）：缺省关闭，`--keep` 保留；解析器风格是"扫描已知
-   *   flag、忽略未知"（新旧同款代码风格），未知的 `--discard` 会被忽略。
-   * 因此【恒显式】即可两代通吃、无需探测版本：
-   *   keep=true  → `--keep`   （新代：保留✓；旧代：保留✓）
-   *   keep=false → `--discard`（新代：关闭✓；旧代：忽略未知 flag → 裸
-   *                             finish → 旧默认关闭✓）
+   * ── keep 语义的代际差异与兼容策略（issue #24）──────────────────────
+   * 旧代（≤1.11.13）：缺省关闭，`--keep` 保留；未知的 `--discard` 被忽略。
+   * 中间代（1.11.16 起）：缺省保留，`--discard` 关闭，仍接受 `--keep`。
+   * 新代（1.13.20+）：缺省保留，`--discard` 关闭；参数校验已删除 `--keep`，
+   *   传入它会在执行前报 REQUEST_FAILED，附带只列 [--discard] 的 finish 用法。
+   * 因此 keep=true 先带 `--keep`，仅遇到上述参数拒绝时去掉 flag 重试一次；
+   * 不能对任意失败都重试裸 finish，否则旧代可能关闭用户想保留的标签页。
+   * keep=false 恒传 `--discard`：旧代忽略未知 flag 后按缺省关闭，其余代直接关闭。
    *
    * 三类错误吞掉不抛（视为"清理已达成"），但每次吞掉都【记一行日志】——
    * 吞错本身是对的，可完全无痕就没法排障（真机复现过：finish 打到漂移后的
@@ -476,7 +474,23 @@ export class TabbitClient {
   async finishTask(task: string, options: { keep?: boolean } = {}): Promise<void> {
     const argv = ['finish', '--task', task, options.keep ? '--keep' : '--discard'];
     try {
-      await this.invoke(argv, '', CONTROL_TIMEOUT_MS);
+      try {
+        await this.invoke(argv, '', CONTROL_TIMEOUT_MS);
+      } catch (error) {
+        // 只认新版 finish 的确切用法签名，不按浏览器版本猜测，也不把超时、
+        // 执行失败或仍列 --keep 的旧版用法当作可重试信号。
+        if (
+          !options.keep ||
+          !(error instanceof TabbitCliError) ||
+          error.code !== CLI_ERROR_CODES.requestFailed ||
+          !/^Usage: tabbit-cli finish --task <name> \[--discard\](?:\s*\||\s*$)/u.test(error.message)
+        ) {
+          throw error;
+        }
+        this.log(`finish --task "${task}": CLI rejected --keep; retrying with keep-by-default finish`);
+        // 重试失败仍走外层的幂等清理规则；其余错误照常交给调用方。
+        await this.invoke(['finish', '--task', task], '', CONTROL_TIMEOUT_MS);
+      }
     } catch (error) {
       const instance = this.resolvedInstanceId() ?? 'unresolved';
       if (isUnknownTaskError(error)) {

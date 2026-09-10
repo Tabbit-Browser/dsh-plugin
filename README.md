@@ -16,7 +16,7 @@ Tabbit Browser 的 DeepSeek Harness（dsh）插件包（bundle）。dsh 可以�
 | **独立"页面读取"权限** | 完善的权限控制。因为与用户共享 cookie，dsh 访问 Tabbit 网页时会确认权限`pageAccess`（默认每会话询问一次）+ `intranetFetch`（web_fetch 访问内网目标默认逐次审批）。 |
 | **`tabbit_browser_install` 工具** | 环境预检：检测已装稳定版 Tabbit、校验 launcher 与 Runtime Service；缺装/过旧时以 dsh 后台任务下载 Tabbit。 |
 | **`tabbit_plugin_update` 工具** | 插件更新检查：每天最多查一次 npm 上的最新发布，有合适版本会离线静默安装； |
-| **`/tabbit-info` 命令** | 在 dsh 输入框内输入 `/tabbit-info` 可诊断：launcher、实例列表（含产品名）、生效实例及来源、权限设置、任务占用。 |
+| **`/tabbit-info` 命令** | 在 dsh 输入框内输入 `/tabbit-info` 可诊断：插件与宿主 DSH 版本、launcher、实例列表（含产品名）、生效实例及来源、权限设置、任务占用。 |
 | **`tabbit` skill** | 告知模型使用 Tabbit 的最佳实践。默认使用 Tabbit 自带的 `~/.agents/skills/tabbit/` 的官方 skill（随浏览器 Runtime 同步演进）。本插件内为兜底版本。 |
 
 ## 安装
@@ -45,7 +45,7 @@ dsh plugin --profile web add link:/path/to/dsh-tabbit   # 本地开发
 
 欢迎扫描下方二维码加入 **dsh-tabbit 开发者交流群**，交流使用心得、反馈问题与探讨新特性：
 
-![dsh-tabbit 开发者交流群](assets/dsh-tabbit-developer-community-qr.png.jpg)
+![dsh-tabbit 开发者交流群](assets/dsh-tabbit-developer-community-qr-2.jpg)
 
 ## 设置
 
