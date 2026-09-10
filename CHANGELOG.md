@@ -1,14 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Fixed `finish: true, keep_tabs: true` failing to close browser tasks on
-  Tabbit 1.13.20+ because its CLI rejects `--keep`
-  (https://github.com/Tabbit-Browser/dsh-tabbit/issues/24). The plugin now
-  retries once with a bare, keep-by-default `finish` only when the CLI
-  returns that generation's usage error. Older browsers still receive
-  `--keep`, and closing tabs still uses `--discard`.
-
 ## 0.3.4
 
 - Adapted to Tabbit Browser 1.13.20+
@@ -23,6 +14,12 @@
   evaluation timeouts are clamped to 60000–120000 ms, the range both old and
   new browsers accept. The internal CLI subprocess timeout grew to 170 s to
   cover the new CLI's longer wait.
+- Fixed `finish: true, keep_tabs: true` failing to close browser tasks on
+  Tabbit 1.13.20+ because its CLI rejects `--keep`
+  (https://github.com/Tabbit-Browser/dsh-tabbit/issues/24). The plugin now
+  retries once with a bare, keep-by-default `finish` only when the CLI
+  returns that generation's usage error. Older browsers still receive
+  `--keep`, and closing tabs still uses `--discard`.
 - `/tabbit-info` now opens its details with the plugin version and the host
   DSH version (`plugin: dsh-tabbit 0.3.4 · host dsh 0.1.5-alpha.2`), so a
   bug report says which copy is actually loaded — a profile that links a
