@@ -15,15 +15,12 @@ import { join } from 'node:path'
 
 import { listAllTabs, pingEndpoint, readEndpoint } from '../lib/runtime/endpoint.js'
 import { listInstancesWindows } from '../lib/runtime/instances.js'
+import { fakeServiceAddress } from './platform.mjs'
 
 const TOKEN = 'test-token-4Vf8jKxq2ZpN7RmW1cSdYbHgAeLuTiOo0'
 const GENERATION = 'ABCDEF0123456789ABCDEF0123456789'
 
-let socketCounter = 0
-// unix socket 路径有 ~104 字节的系统上限，用短名直接放 tmpdir 根（不进 mkdtemp 子目录）。
-function socketPath() {
-  return join(tmpdir(), `dsh-tabbit-ep-${process.pid}-${socketCounter++}.sock`)
-}
+/* 监听地址按平台取（POSIX unix socket / Windows named pipe），见 platform.mjs。 */
 
 /*
  * 起一个假 Runtime Service 公开端点。behavior 决定认证后的响应方式：
@@ -35,7 +32,7 @@ function socketPath() {
  * 分派的服务端，测新代 CLI 回退路径）。
  */
 async function startFakeService({ value, behavior = 'respond', token = TOKEN, onBadAuth, handler } = {}) {
-  const address = socketPath()
+  const address = fakeServiceAddress()
   const connections = []
   const server = createServer((socket) => {
     connections.push(socket)

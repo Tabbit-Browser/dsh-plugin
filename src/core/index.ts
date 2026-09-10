@@ -154,9 +154,13 @@ export class TabbitService {
   // 现读，天然支持热更新（用户改设置立即生效，无需重启）。
   // logger 可选（apply 里接的是 dsh 的 ctx.logger）：会透传给每个 TabbitClient，
   // 让 finish 吞错、清理失败、隔离恢复这些原本静默的路径在 dsh 日志里留痕。
+  // registryDir 可选：只给测试用——Windows 的实例注册表位置来自 %LOCALAPPDATA%
+  // 而不是 HOME，测试想"装一个没有实例的环境"没法靠改 HOME 做到，传一个空目录
+  // 才能真隔离（不传时行为与以前完全一致）。
   constructor(
     private readonly readSettings: () => TabbitSettings,
     private readonly logger?: (message: string) => void,
+    private readonly registryDir?: string,
   ) {}
 
   /* 记录当前观看 dsh web UI 的 Tabbit 实例（mentions 的 /tabbit/instance-hint 路由调用；后写覆盖先写）。 */
@@ -182,7 +186,7 @@ export class TabbitService {
   resolveExecutionInstance(): ResolvedInstance {
     const settings = this.readSettings();
     if (settings.instance !== '') return { id: settings.instance, source: 'settings' };
-    const instances = listInstances();
+    const instances = this.registry();
     const viewer = this.viewerInstance;
     if (viewer !== undefined && instances.some((instance) => instance.id === viewer.id && instance.online)) {
       return { id: viewer.id, source: 'dsh-web-viewer' };
@@ -251,7 +255,12 @@ export class TabbitService {
   }
 
   instances(): TabbitInstance[] {
-    return listInstances();
+    return this.registry();
+  }
+
+  /* 实例注册表读取的唯一入口：registryDir 给了就用它（测试隔离），否则走默认位置。 */
+  private registry(): TabbitInstance[] {
+    return this.registryDir === undefined ? listInstances() : listInstances(this.registryDir);
   }
 
   /*
@@ -268,7 +277,7 @@ export class TabbitService {
    *     0 个在线报离线、多个在线报歧义（带清单的引导错误）。
    */
   async listAllTabs(options: { instanceId?: string; timeoutMs?: number } = {}): Promise<TabbitTabInventory> {
-    const instances = listInstances();
+    const instances = this.registry();
     const wanted = options.instanceId ?? this.resolveExecutionInstance().id;
     let target: TabbitInstance | undefined;
     if (wanted !== undefined) {
@@ -685,6 +694,10 @@ export function apply(ctx: Context): void {
     // 把 dsh 日志器接给服务与底层客户端：finish 吞错/清理失败/隔离恢复这些
     // 原本静默的路径由此在 dsh 日志里可见（排查实例漂移导致标签组残留的关键痕迹）。
     (message) => ctx.logger.info(`dsh-tabbit: ${message}`),
+    // 实例注册表目录：生产走默认位置，测试（mock ctx 里带 tabbit.registryDir）
+    // 传空目录来真隔离——Windows 的注册表不在 HOME 下，改 HOME 隔离不掉。
+    // 走 unknown 中转是因为 dsh 的 Context 类型是闭集，塞不进额外字段。
+    (ctx as unknown as { tabbit?: { registryDir?: string } }).tabbit?.registryDir,
   );
   // ② 发布 ctx.tabbit 服务——其它五个模块 inject: ['tabbit'] 等的就是这句。
   ctx.provide('tabbit', service);

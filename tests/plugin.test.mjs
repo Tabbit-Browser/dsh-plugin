@@ -3,7 +3,7 @@
 // 自 0.2.x 世代的测试改造而来。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as installer from '../lib/installer/index.js'
@@ -189,15 +189,17 @@ test('the update tool defers to the browser for managed (preinstalled) copies', 
 })
 
 test('/tabbit-info 把整份报告放进命令结果文本，不向会话日志追加任何事件', async () => {
-  // 封闭性：HOME 指到空目录 → 实例注册表读不到（instances 为空、无 CLI
-  // 调用），settings 里 launcherPath 再指到不存在的路径 → 结论走“未安装”
-  // 分支。整个 handler 不碰真实浏览器/文件系统。
+  // 封闭性：实例注册表指到一个空目录 → instances 为空、无 CLI 调用，settings
+  // 里 launcherPath 再指到不存在的路径 → 结论走“未安装”分支。整个 handler
+  // 不碰真实浏览器/文件系统。
+  // 注册表目录必须显式注入：Windows 上它的位置来自 %LOCALAPPDATA%，把 HOME
+  // 指到空目录根本隔离不掉本机真在跑的 Tabbit（这条用例在 Windows 上会读到
+  // 真实实例而假失败）。
   const emptyHome = await mkdtemp(join(tmpdir(), 'tabbit-test-home-'))
-  const savedHome = process.env.HOME
-  process.env.HOME = emptyHome
   try {
     const commands = []
     const ctx = {
+      tabbit: { registryDir: emptyHome },
       settings: {
         register: () => ({
           get: () => ({
@@ -249,8 +251,7 @@ test('/tabbit-info 把整份报告放进命令结果文本，不向会话日志�
     assert.match(versionLine, /^plugin: dsh-tabbit \d+\.\d+\.\d+/u)
     assert.match(versionLine, / · host dsh \d+\.\d+\.\d+/u)
   } finally {
-    if (savedHome === undefined) delete process.env.HOME
-    else process.env.HOME = savedHome
+    await rm(emptyHome, { recursive: true, force: true })
   }
 })
 

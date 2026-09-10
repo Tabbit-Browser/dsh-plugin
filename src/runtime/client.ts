@@ -59,6 +59,9 @@ export interface TabbitClientOptions {
    * ~/.local/bin/tabbit-cli，回退旧名 tabbit-playwright；Windows 为
    * %LOCALAPPDATA%\Tabbit\LocalAgent\bin\tabbit-cli.exe）。 */
   launcherPath?: string;
+  /* 拼在 CLI 动词之前的固定参数，默认空。给测试夹具与"包一层包装脚本"的安装
+   * 形态用，语义见 cli.ts 的 RunCliOptions.launcherArgs。 */
+  launcherArgs?: readonly string[];
   /* 16 位 hex 实例 id；不传则每次调用时从注册表自动解析。 */
   instanceId?: string;
   /* 可选的日志回调：恢复动作（隔离/重置重试）与 finishTask 吞掉的错误都会打一行说明。 */
@@ -254,6 +257,7 @@ export class TabbitClient {
     try {
       return await runCli(argv, stdin, {
         launcherPath: this.launcher(),
+        ...(this.options.launcherArgs ? { launcherArgs: this.options.launcherArgs } : {}),
         instanceId: this.instance(),
         timeoutMs,
         ...(signal ? { signal } : {}),
