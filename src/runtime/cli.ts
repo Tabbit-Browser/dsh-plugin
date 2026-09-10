@@ -28,6 +28,9 @@ import { TabbitCliError, classifyAppError } from './errors.js';
 export interface RunCliOptions {
   /* launcher 可执行文件路径。 */
   launcherPath: string;
+  /* 拼在 CLI 动词之前的固定参数。默认空；测试夹具用它把"可执行文件 + 脚本
+   * 路径"两段式调用写成同一件事（POSIX 与 Windows 通吃，见 tests/platform.mjs）。 */
+  launcherArgs?: readonly string[];
   /* 设置了就通过环境变量 TABBIT_PLAYWRIGHT_INSTANCE 告诉 launcher 用哪个实例。 */
   instanceId?: string;
   /* 对子进程整体的墙钟超时（毫秒），超时就杀进程。 */
@@ -74,7 +77,7 @@ export async function runCli(argv: string[], stdin: string, options: RunCliOptio
   return await new Promise<unknown>((resolve, reject) => {
     let child;
     try {
-      child = spawn(options.launcherPath, argv, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawn(options.launcherPath, [...(options.launcherArgs ?? []), ...argv], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       // spawn 同步抛错的少见路径（参数非法等）；常见的 ENOENT 走 'error' 事件。
       reject(spawnFailure(options.launcherPath, error));

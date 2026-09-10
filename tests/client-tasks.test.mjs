@@ -4,17 +4,24 @@
 // 60 秒、finish 不接受 --keep）或旧代（有 `tasks`、`diagnose` 只回计数、
 // --timeout-ms 上限 120 秒、finish 必须显式 --keep 才保留标签页），
 // 并把每次收到的 argv 记进日志供断言。注册表放在临时 HOME 下，只登记这一个
-// 实例，cliPath 指向假 launcher 本身。
+// 实例，cliPath 指向 node 可执行文件本身（脚本路径走 launcherArgs，见
+// tests/platform.mjs——Windows 起不了无扩展名的 shebang 脚本）。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { TabbitClient } from '../lib/runtime/client.js'
+import { fakeCliCommand } from './platform.mjs'
 
-const FAKE_LAUNCHER = `#!/usr/bin/env node
-'use strict';
+/*
+ * 假 launcher 的脚本本体。不用 shebang：它由 node 可执行文件显式跑起来
+ * （见 fakeCliCommand），Windows 上同样成立。扩展名必须是 .cjs——包是 ESM，
+ * .js 会被当 ES module 解析，require 直接报错。argv 形如
+ * [node, 脚本本身, 动词, ...]，所以动词从 slice(2) 起。
+ */
+const FAKE_LAUNCHER = `'use strict';
 const fs = require('node:fs');
 const argv = process.argv.slice(2);
 fs.readFileSync(0);
@@ -57,7 +64,7 @@ switch (argv[0]) {
     const timeoutMs = Number(argv[argv.indexOf('--timeout-ms') + 1]);
     if (generation === 'old' && (timeoutMs <= 0 || timeoutMs > 120000)) fail('timeoutMs must be positive and at most 120000');
     if (generation !== 'old' && (timeoutMs < 60000 || timeoutMs > 180000)) fail('--timeout-ms must be from 60000 through 180000');
-    console.log(JSON.stringify({ status: 'succeeded', result: { value: 42 }, task: { taskId: 'task-2', taskName: argv[2], reused: false } }));
+    console.log(JSON.stringify({ status: 'succeeded', result: { value: 42 }, task: { taskId: 'task-2', taskName: argv[1], reused: false } }));
     break;
   }
   default:
@@ -68,14 +75,15 @@ switch (argv[0]) {
 /* 临时 HOME：假 launcher + 只登记它一个实例的注册表 + argv 日志。 */
 async function fakeHome(finishErrors) {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tabbit-client-'))
-  const launcher = join(home, 'tabbit-cli')
+  const launcher = join(home, 'tabbit-cli.cjs')
   await writeFile(launcher, FAKE_LAUNCHER)
-  await chmod(launcher, 0o755)
+  /* 注册表里的 cliPath 也写 node 可执行文件：解析出来的实例与显式传的
+   * launcherPath 指向同一支"CLI"。 */
   const registry = join(home, '.local', 'share', 'tabbit-playwright', 'instances')
   await mkdir(registry, { recursive: true })
   await writeFile(
     join(registry, 'AAAA0000BBBB1111.instance'),
-    `# tabbit-playwright instance managed by Tabbit Browser\n${launcher}\n${join(home, 'endpoint.json')}\n`,
+    `# tabbit-playwright instance managed by Tabbit Browser\n${process.execPath}\n${join(home, 'endpoint.json')}\n`,
   )
   const log = join(home, 'argv.log')
   await writeFile(log, '')
@@ -97,7 +105,8 @@ async function withFakeLauncher(generation, run, finishErrors = []) {
   process.env.FAKE_LAUNCHER_LOG = fixture.log
   process.env.FAKE_LAUNCHER_GENERATION = generation
   try {
-    await run(new TabbitClient({ launcherPath: fixture.launcher }), fixture)
+    const { command, args } = fakeCliCommand(fixture.launcher)
+    await run(new TabbitClient({ launcherPath: command, launcherArgs: args }), fixture)
   } finally {
     for (const [key, value] of [['HOME', saved.HOME], ['FAKE_LAUNCHER_LOG', saved.LOG], ['FAKE_LAUNCHER_GENERATION', saved.GENERATION]]) {
       if (value === undefined) delete process.env[key]

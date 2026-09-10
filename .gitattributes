@@ -1,0 +1,10 @@
+# 行尾统一为 LF，与仓库里已有的 blob 一致（仓库从未提交过 CRLF）。
+#
+# 不写这份文件时，Windows 上 core.autocrlf=true 的默认配置会把文本文件检出成
+# CRLF，于是 tests/cordis-patch.test.mjs 里按行解析 cordis.patch.yml 的正则
+# （`^- id: web\n…`）一个都匹配不上，四个补丁断言在 Windows 上必然失败——而
+# 打的包发到别的机器上又是 LF，属于只在开发者本机复现的假失败。
+#
+# text=auto 让 Git 自己判断哪些是文本（jpeg 等二进制不受影响）；eol=lf 保证
+# 检出侧也是 LF，不看用户本地的 core.autocrlf。
+* text=auto eol=lf
