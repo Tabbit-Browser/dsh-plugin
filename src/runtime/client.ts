@@ -6,7 +6,7 @@
  * runtime/ 目录的"总装层"：把 cli.ts（子进程调用）、codec.ts（base64 信封）、
  * errors.ts（错误分类）、instances.ts（实例注册表）组合成一个好用的类。
  * 负责：实例选择、请求排队/并发控制、结果解码、超大结果的分块读回、
- * 以及两类故障（任务隔离 quarantine、任务重置 task-reset）的自动恢复。
+ * 以及任务隔离 quarantine、任务重置 task-reset 的恢复处理。
  *
  * ⚠️ 本文件（乃至整个 runtime/ 目录）完全不依赖任何 dsh 包——可以脱离 dsh
  * 单独使用（`node` 里直接 import lib/runtime/client.js 做脚本调试）。
@@ -71,11 +71,11 @@ export interface EvaluateRequest {
   task: string;
   /* async 函数体，可用 Playwright 注入全局（browser/context/page/…）。 */
   code: string;
-  /* 声明本次调用无副作用（只读）。好处：中断后服务端不会隔离任务。 */
+  /* 声明本次调用无副作用；仅旧版 CLI 支持，新版 CLI 没有对应参数。 */
   readOnly?: boolean;
   /* 单次求值超时；发给服务端前会钳位到 [EVAL_TIMEOUT_FLOOR_MS, EVAL_TIMEOUT_CEILING_MS]。 */
   timeoutMs?: number;
-  /* 要认领的标签页 id——【只在本次调用恰好创建该任务时生效】。 */
+  /* 要认领的标签页 id；旧版仅在创建任务时生效，新版每次求值都可用。 */
   claimTabs?: number[];
   /* 是否让浏览器把任务标签页切到前台（默认不抢焦点）。 */
   foreground?: boolean;
@@ -267,12 +267,10 @@ export class TabbitClient {
 
   /*
    * 求值主入口：带自动恢复的重试循环（最多 3 次尝试，attempt 0/1/2）。
-   * 三种可自动恢复的失败，各自的处理：
+   * 三类故障各自的处理：
    *
-   *  - quarantined（任务被隔离）：一次带副作用的求值被中断后，服务端把任务
-   *    锁起来拒绝新请求，要求先 checkpoint 确认状态。我们自动补一次
-   *    checkpoint 然后重试，并在 notes 里向模型说明（它可能需要核实上次
-   *    操作到底成没成功）。
+   *  - quarantined（任务被隔离）：旧版 CLI 的 checkpoint 成功后才重试。
+   *    新版 CLI 没有 checkpoint；若命令失败，立即报错，不重复执行求值。
    *
    *  - task-reset（任务重置）：worker 丢了/浏览器重启了，任务里的页面和
    *    globalThis 全没了。直接重试会在【全新的空任务】里执行——所以必须
@@ -295,7 +293,15 @@ export class TabbitClient {
           if (!(error instanceof TabbitCliError) || attempt >= 2) throw error;
           if (error.kind === 'quarantined') {
             this.log(`task ${request.task} quarantined; running checkpoint`);
-            await this.checkpoint(request.task).catch(() => undefined);
+            try {
+              await this.checkpoint(request.task);
+            } catch (checkpointError) {
+              throw new TabbitCliError({
+                kind: 'quarantined',
+                code: 'CHECKPOINT_FAILED',
+                message: `Task "${request.task}" remains quarantined: checkpoint failed (${checkpointError instanceof Error ? checkpointError.message : String(checkpointError)}). Verify the previous action before retrying or ending this task.`,
+              });
+            }
             notes.push('Task was quarantined after an interrupted run; a checkpoint was taken and the call was retried.');
             continue;
           }
@@ -321,9 +327,8 @@ export class TabbitClient {
    * 单次求值（不含重试）。流程：
    *  1. 生成唯一 requestId（幂等追踪用）并拼 `nodejs` 命令的参数；
    *  2. 用信封包装代码，经 invoke 提交（代码走 stdin）；
-   *  3. 校验 claim_tabs 语义：claim 只在任务【创建】时生效——若服务端说
-   *     reused（任务早已存在），claim 实际被无视了，与其静默让调用者误以为
-   *     认领成功，不如报错让它换个新任务名；
+   *  3. 旧版 CLI 的 claim 只在创建任务时生效，复用任务时要报错；新版的
+   *     --tab 每次求值都可获取标签页，不做此检查；
    *  4. 回执可能还没到终态（queued/running），轮询等它；
    *  5. 按回执状态返回成功（解码结果）或失败（提取错误信息）。
    */
@@ -343,8 +348,9 @@ export class TabbitClient {
       return values;
     };
     let response: Record<string, unknown>;
+    let usedModernSyntax = this.modernNodejsSyntax;
     try {
-      response = (await this.invoke(argv(this.modernNodejsSyntax), source, SUBPROCESS_TIMEOUT_MS, request.signal)) as Record<string, unknown>;
+      response = (await this.invoke(argv(usedModernSyntax), source, SUBPROCESS_TIMEOUT_MS, request.signal)) as Record<string, unknown>;
     } catch (error) {
       if (
         this.modernNodejsSyntax ||
@@ -353,13 +359,14 @@ export class TabbitClient {
         !/^Usage: tabbit-cli .*\bnodejs --task <name> --request-id <id> \[--tab <id>\.\.\. \| --group <id>\]/u.test(error.message)
       ) throw error;
       this.modernNodejsSyntax = true;
+      usedModernSyntax = true;
       this.log('nodejs: CLI rejected legacy flags; using current nodejs arguments');
       response = (await this.invoke(argv(true), source, SUBPROCESS_TIMEOUT_MS, request.signal)) as Record<string, unknown>;
     }
 
     // 新版成功回执在复用任务时省略 task；调用方仍需要稳定的任务名。
     const task = (response.task ?? { taskId: '', taskName: request.task, reused: true }) as TaskMetadata;
-    if ((request.claimTabs?.length ?? 0) > 0 && task.reused) {
+    if (!usedModernSyntax && (request.claimTabs?.length ?? 0) > 0 && task.reused) {
       throw new TabbitCliError({
         kind: 'tab-claim',
         code: 'CLAIM_REQUIRES_NEW_TASK',

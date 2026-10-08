@@ -54,20 +54,32 @@ switch (argv[0]) {
     break;
   }
   case 'nodejs': {
-    if (generation === 'modern' && argv.some(value => ['--read-only', '--foreground', '--claim-tab'].includes(value))) {
+    if (generation.startsWith('modern') && argv.some(value => ['--read-only', '--foreground', '--claim-tab'].includes(value))) {
       fail('Usage: tabbit-cli finish --task <name> [--discard] | nodejs --task <name> --request-id <id> [--tab <id>... | --group <id>] [--timeout-ms <ms>]', 'REQUEST_FAILED');
     }
     const timeoutMs = Number(argv[argv.indexOf('--timeout-ms') + 1]);
     if (generation === 'old' && (timeoutMs <= 0 || timeoutMs > 120000)) fail('timeoutMs must be positive and at most 120000');
     if (generation !== 'old' && (timeoutMs < 60000 || timeoutMs > 180000)) fail('--timeout-ms must be from 60000 through 180000');
-    const reused = generation === 'modern' && state.modernNodejsCalls > 0;
+    if (generation === 'old-quarantined' && !state.nodejsInterrupted) {
+      state.nodejsInterrupted = true;
+      saveState();
+      fail('Task alpha is quarantined; checkpoint before submitting more work', 'REQUEST_FAILED');
+    }
+    if (generation === 'modern-quarantined') {
+      fail('Task alpha is quarantined; checkpoint before submitting more work', 'REQUEST_FAILED');
+    }
+    const reused = (generation === 'modern' && state.modernNodejsCalls > 0) || generation === 'old-reused';
     if (generation === 'modern') {
       state.modernNodejsCalls = (state.modernNodejsCalls || 0) + 1;
       saveState();
     }
-    console.log(JSON.stringify({ status: 'succeeded', result: { value: 42 }, ...(reused ? {} : { task: { taskId: 'task-2', taskName: argv[2], reused: false } }) }));
+    console.log(JSON.stringify({ status: 'succeeded', result: { value: 42 }, ...((generation === 'modern' && reused) ? {} : { task: { taskId: 'task-2', taskName: argv[2], reused } }) }));
     break;
   }
+  case 'checkpoint':
+    if (generation === 'modern-quarantined') fail('Usage: tabbit-cli finish --task <name> [--discard] | nodejs --task <name> ...', 'REQUEST_FAILED');
+    console.log(JSON.stringify({ checkpointed: true }));
+    break;
   default:
     fail('Usage: ...');
 }
@@ -166,6 +178,43 @@ test('evaluate adapts once to the current nodejs CLI syntax used by web_fetch', 
     assert.ok(calls[0].includes('--read-only'))
     assert.ok(calls.slice(1).every(argv => !argv.includes('--read-only')))
     assert.equal(calls[0][calls[0].indexOf('--request-id') + 1], calls[1][calls[1].indexOf('--request-id') + 1])
+  })
+})
+
+test('modern nodejs --tab works when an existing task is reused', async () => {
+  await withFakeLauncher('modern', async (client, fixture) => {
+    await client.evaluate({ task: 'alpha', code: 'return 42', readOnly: true })
+    const outcome = await client.evaluate({ task: 'alpha', code: 'return 42', claimTabs: [17] })
+    assert.equal(outcome.status, 'succeeded')
+    assert.equal(outcome.result.value, 42)
+    assert.deepEqual((await fixture.calls()).at(-1).slice(-2), ['--tab', '17'])
+  })
+})
+
+test('legacy --claim-tab still rejects reuse', async () => {
+  await withFakeLauncher('old-reused', async (client) => {
+    await assert.rejects(client.evaluate({ task: 'alpha', code: 'return 42', claimTabs: [17] }), {
+      code: 'CLAIM_REQUIRES_NEW_TASK',
+    })
+  })
+})
+
+test('quarantined task retries only after a successful legacy checkpoint', async () => {
+  await withFakeLauncher('old-quarantined', async (client, fixture) => {
+    const outcome = await client.evaluate({ task: 'alpha', code: 'return 42' })
+    assert.equal(outcome.status, 'succeeded')
+    assert.deepEqual((await fixture.calls()).map(argv => argv[0]), ['nodejs', 'checkpoint', 'nodejs'])
+    assert.match(outcome.notes.join(' '), /checkpoint was taken/u)
+  })
+})
+
+test('quarantined task does not retry after the current CLI rejects checkpoint', async () => {
+  await withFakeLauncher('modern-quarantined', async (client, fixture) => {
+    await assert.rejects(client.evaluate({ task: 'alpha', code: 'return 42', readOnly: true }), {
+      code: 'CHECKPOINT_FAILED',
+      message: /remains quarantined.*checkpoint failed/u,
+    })
+    assert.deepEqual((await fixture.calls()).map(argv => argv[0]), ['nodejs', 'nodejs', 'checkpoint'])
   })
 })
 

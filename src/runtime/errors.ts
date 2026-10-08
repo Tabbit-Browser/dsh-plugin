@@ -78,8 +78,8 @@ export type TabbitErrorKind =
   | 'busy'
   /* 任务的 worker 或整个服务代际没了：任务内的页面、globalThis 状态全部丢失。 */
   | 'task-reset'
-  /* 任务被"隔离"（quarantine）：一次带副作用的求值被中断后，服务端拒绝接新活，
-   *  必须先做一次 checkpoint（检查点）确认状态，才能继续提交。 */
+  /* 任务被"隔离"（quarantine）：一次带副作用的求值被中断后，服务端拒绝接新活。
+   *  旧版 CLI 可用 checkpoint 恢复；新版 CLI 没有该命令。 */
   | 'quarantined'
   /* 请求 claim 的标签页 id 认领失败。 */
   | 'tab-claim'

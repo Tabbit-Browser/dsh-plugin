@@ -185,7 +185,7 @@ export function apply(ctx: Context): void {
         // 新版 CLI 暂无对应参数。
         read_only: {
           type: 'boolean',
-          description: 'Declare that this call performs no mutations; supported Tabbit versions use this for safer interruption recovery.',
+          description: 'Declare that this call performs no mutations. Older Tabbit versions use this for interruption recovery; current versions do not support this hint.',
         },
         timeout_ms: {
           type: 'integer',
