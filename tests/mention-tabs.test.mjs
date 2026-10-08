@@ -142,20 +142,22 @@ test('roster degrades to task pages only when the inventory is unavailable', asy
   assert.match(res.captured.body.note, /user tabs unavailable/)
 })
 
-test('extract with userTab stashes the body and returns a token instead of the text', async () => {
-  const calls = { evaluate: [], marked: [] }
+test('extract with userTab stashes the body and closes its fetch task', async () => {
+  const calls = { evaluate: [], finished: 0 }
   const { routes } = mentionCtx({
-    client: () => ({
-      evaluate: async (request) => {
-        calls.evaluate.push(request)
-        return {
-          status: 'succeeded',
-          result: { value: { url: 'https://docs.example/a', title: '文档', text: '正文内容', truncated: false } },
-        }
-      },
-      resolvedInstanceId: () => 'B'.repeat(16),
-    }),
-    markFetchTaskUsed: (instanceId) => calls.marked.push(instanceId),
+    withFetchTask: async (run) => {
+      try {
+        return await run({ evaluate: async (request) => {
+          calls.evaluate.push(request)
+          return {
+            status: 'succeeded',
+            result: { value: { url: 'https://docs.example/a', title: '文档', text: '正文内容', truncated: false } },
+          }
+        } })
+      } finally {
+        calls.finished += 1
+      }
+    },
   })
   const res = fakeRes()
   await routes.get('/tabbit/mention/extract')(
@@ -178,7 +180,7 @@ test('extract with userTab stashes the body and returns a token instead of the t
   assert.equal(calls.evaluate[0].task, FETCH_TASK_NAME)
   assert.equal(calls.evaluate[0].readOnly, true)
   assert.match(calls.evaluate[0].code, /docs\.example/)
-  assert.deepEqual(calls.marked, ['B'.repeat(16)])
+  assert.equal(calls.finished, 1)
 })
 
 test('extract with userTab rejects non-http(s) urls upfront', async () => {

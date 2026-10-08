@@ -30,8 +30,8 @@
  *      提取被提及页面的标题+正文（用户点发送时由 chip 的序列化逻辑调用）。
  *      两种请求体：
  *        {"task","url","index"} —— 任务页：在所属任务里就地读取（live 状态）；
- *        {"url","userTab":true} —— 用户标签页：在共享只读 fetch 任务里【重新
- *      打开该 URL】提取后关页（与 web_fetch 同机制，共享登录态）。不直接读
+ *        {"url","userTab":true} —— 用户标签页：在 fetch 任务里【重新
+ *      打开该 URL】提取后结束任务（与 web_fetch 同机制，共享登录态）。不直接读
  *      用户标签页本体是刻意的：就地读取必须先 claim——那会把用户的标签页
  *      可见地挪进代理标签组，对一次提及来说过于侵入。代价是拿到的是该 URL
  *      的新副本而非用户页面的实时状态（表单输入、滚动位置等不包含）。
@@ -583,17 +583,16 @@ return { url: p.url(), title, text, truncated };`,
 }
 
 /*
- * 用户标签页的提取：在共享只读 fetch 任务（FETCH_TASK_NAME，与 web_fetch
+ * 用户标签页的提取：在抓取任务（FETCH_TASK_NAME，与 web_fetch
  * 同一个）里开新页重取该 URL——共享用户登录态，但【不触碰】用户的原标签页
- * （不 claim、不挪组、不抢焦点）。取完 finally 必关页。
+ * （不 claim、不挪组、不抢焦点）。取完关页并结束任务。
  * 结果带 refetched:true，前端把它标进 <browser-tab> 块，让模型知道内容是
  * 该 URL 的新副本、不是用户页面的实时状态。
  * 失败如实回 5xx——前端拿到错误会阻断发送（同任务页提取的语义）。
  */
 async function extractUserTab(ctx: Context, stash: Map<string, StashedExtraction>, url: string, res: ServerResponse): Promise<void> {
   try {
-    const client = ctx.tabbit.client();
-    const outcome = await client.evaluate({
+    const outcome = await ctx.tabbit.withFetchTask(async (client) => client.evaluate({
       task: FETCH_TASK_NAME,
       readOnly: true,
       timeoutMs: EVAL_TIMEOUT_MS,
@@ -620,9 +619,7 @@ try {
 } finally {
   try { await p.close(); } catch {}
 }`,
-    });
-    // 登记共享任务实际用的实例（插件卸载清理要在对的实例上 finish 它）。
-    ctx.tabbit.markFetchTaskUsed(client.resolvedInstanceId());
+    }));
     if (outcome.status !== 'succeeded') {
       return sendJson(res, 500, { error: outcome.errorMessage ?? 'extraction failed' });
     }

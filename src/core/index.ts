@@ -131,7 +131,7 @@ function readConfig(config: CurrentConfig): TabbitSettings {
 }
 
 /*
- * web_fetch 共用任务的固定名字。注意：任务名同时是浏览器里标签组的可见标题
+ * web_fetch 与 @tab 重取共用任务的固定名字。注意：任务名同时是浏览器里标签组的可见标题
  * （Runtime Service 没有独立标题字段），所以起成给用户看的样子。
  */
 export const FETCH_TASK_NAME = 'DeepSeek Harness · Web Fetch';
@@ -155,6 +155,8 @@ export class TabbitService {
   /* 缓存的 TabbitClient（按"实例id+launcher路径"作 key，配置变了就重建）。 */
   private cachedClient: TabbitClient | undefined;
   private cachedKey = '';
+  /* 抓取与任务结束必须串行；否则下一次抓取可能在上一次 finish 前复用同一任务。 */
+  private fetchTaskQueue: Promise<void> = Promise.resolve();
   /*
    * 会话任务登记表：agentId → 任务名 → 该任务【实际在哪些实例上执行过】。
    *
@@ -253,6 +255,21 @@ export class TabbitService {
       this.cachedKey = key;
     }
     return this.cachedClient;
+  }
+
+  /* 每次抓取后结束任务并丢弃任务标签页；成功、导航失败和取消都走清理。 */
+  async withFetchTask<T>(run: (client: TabbitClient) => Promise<T>): Promise<T> {
+    const current = this.fetchTaskQueue.then(async () => {
+      const client = this.client();
+      this.markFetchTaskUsed(client.resolvedInstanceId());
+      try {
+        return await run(client);
+      } finally {
+        await client.finishTask(FETCH_TASK_NAME);
+      }
+    });
+    this.fetchTaskQueue = current.then(() => undefined, () => undefined);
+    return await current;
   }
 
   /*
@@ -369,7 +386,7 @@ export class TabbitService {
     return this.defaultTaskNames.get(agentId);
   }
 
-  /* 登记共享 fetch 任务在某实例上被用过（供 releaseAll 精准清理）。 */
+  /* 登记抓取任务在某实例上被用过（供 releaseAll 补偿清理）。 */
   markFetchTaskUsed(instanceId: string | undefined): void {
     this.fetchTaskInstances.add(instanceId);
   }
@@ -466,6 +483,7 @@ export class TabbitService {
    * 一切任务——所有会话任务 + 共享 fetch 任务，同样按"任务×实例"逐对 finish。
    */
   async releaseAll(): Promise<void> {
+    await this.fetchTaskQueue;
     const targets: Array<{ taskName: string; instanceId: string | undefined }> = [];
     for (const tasks of this.sessionTaskRegistry.values()) {
       for (const [taskName, instanceIds] of tasks) {

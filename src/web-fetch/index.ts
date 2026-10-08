@@ -20,9 +20,9 @@
  *    最终 URL（重定向后的落点）再查一次，公网请求跳到内网目标一律拒绝
  *    返回内容（redirect containment，防"公网 URL 302 进内网"绕闸）。
  *
- * 执行模型：所有 fetch 共用一个固定只读任务（FETCH_TASK_NAME，在用户浏览器
- * 里显示为 "DeepSeek Harness · Web Fetch" 标签组）；每个请求开一个新页
- * （用户可见、不抢焦点），提取完 finally 关页——任务本身常驻复用。
+ * 执行模型：所有 fetch 共用一个固定任务名（FETCH_TASK_NAME，在用户浏览器
+ * 里显示为 "DeepSeek Harness · Web Fetch" 标签组）；每次请求开新页，
+ * 提取后关页并 finish 任务，避免留下任务自带的 about:blank 标签组。
  *
  * 选择机制：dsh 的 `ctx.web` 按【钉死的 provider id】选 provider——没有
  * 优先级链，config 里钉的 id 还优先于环境变量 DSH_WEB_FETCH_PROVIDER。基座
@@ -102,15 +102,16 @@ class TabbitFetchProvider implements WebFetchProvider {
     // 批准过了）——这种请求最终落在内网属正常，不该被下面的重定向围堵误杀。
     const requestWasPrivate = hostIsObviouslyPrivate(url.hostname);
 
-    const client = this.tabbit.client();
     let outcome;
     try {
-      outcome = await client.evaluate({
-        task: FETCH_TASK_NAME,
-        readOnly: true, // 旧版 CLI 可声明只读；新版 CLI 无此参数，client 会自动兼容
-        timeoutMs: EVAL_TIMEOUT_MS,
-        code: buildFetchCode(url.href),
-        ...(signal ? { signal } : {}),
+      outcome = await this.tabbit.withFetchTask(async (client) => {
+        return await client.evaluate({
+          task: FETCH_TASK_NAME,
+          readOnly: true, // 旧版 CLI 可声明只读；新版 CLI 无此参数，client 会自动兼容
+          timeoutMs: EVAL_TIMEOUT_MS,
+          code: buildFetchCode(url.href),
+          ...(signal ? { signal } : {}),
+        });
       });
     } catch (error) {
       // CLI 层错误 → 翻译成 dsh 的 WebError（错误码映射见 webErrorCode）。
@@ -119,9 +120,6 @@ class TabbitFetchProvider implements WebFetchProvider {
       }
       throw error;
     }
-    // 登记共享任务实际用的实例（插件卸载时 releaseAll 要在对的实例上 finish 它）。
-    this.tabbit.markFetchTaskUsed(client.resolvedInstanceId());
-
     if (outcome.status === 'failed') {
       const message = outcome.errorMessage ?? 'navigation failed';
       const code = /timeout/iu.test(message) ? 'FETCH_TIMEOUT' : 'FETCH_FAILED';

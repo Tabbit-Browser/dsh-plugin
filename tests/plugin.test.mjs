@@ -7,7 +7,27 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as installer from '../lib/installer/index.js'
-import { skillProvider, apply as applyCore, parseSkillDocument } from '../lib/core/index.js'
+import { TabbitService, skillProvider, apply as applyCore, parseSkillDocument } from '../lib/core/index.js'
+
+test('fetch task is finished after each run and before the next starts, including failures', async () => {
+  const service = new TabbitService(() => ({ instance: '', launcherPath: '', pageAccess: 'ask', intranetFetch: 'ask' }))
+  const events = []
+  service.client = () => ({
+    resolvedInstanceId: () => 'A'.repeat(16),
+    finishTask: async () => { events.push('finish') },
+  })
+  let releaseFirst
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const first = service.withFetchTask(async () => { events.push('first'); await firstGate; return 1 })
+  const second = service.withFetchTask(async () => { events.push('second'); throw new Error('navigation failed') })
+  const secondCheck = assert.rejects(second, /navigation failed/)
+  await Promise.resolve()
+  assert.deepEqual(events, ['first'])
+  releaseFirst()
+  assert.equal(await first, 1)
+  await secondCheck
+  assert.deepEqual(events, ['first', 'finish', 'second', 'finish'])
+})
 
 const SUPPORTED = {
   installations: [{ name: 'Tabbit', edition: 'international', channel: 'stable', version: '1.9.2' }],
