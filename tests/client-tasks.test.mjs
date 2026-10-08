@@ -54,10 +54,18 @@ switch (argv[0]) {
     break;
   }
   case 'nodejs': {
+    if (generation === 'modern' && argv.some(value => ['--read-only', '--foreground', '--claim-tab'].includes(value))) {
+      fail('Usage: tabbit-cli finish --task <name> [--discard] | nodejs --task <name> --request-id <id> [--tab <id>... | --group <id>] [--timeout-ms <ms>]', 'REQUEST_FAILED');
+    }
     const timeoutMs = Number(argv[argv.indexOf('--timeout-ms') + 1]);
     if (generation === 'old' && (timeoutMs <= 0 || timeoutMs > 120000)) fail('timeoutMs must be positive and at most 120000');
     if (generation !== 'old' && (timeoutMs < 60000 || timeoutMs > 180000)) fail('--timeout-ms must be from 60000 through 180000');
-    console.log(JSON.stringify({ status: 'succeeded', result: { value: 42 }, task: { taskId: 'task-2', taskName: argv[2], reused: false } }));
+    const reused = generation === 'modern' && state.modernNodejsCalls > 0;
+    if (generation === 'modern') {
+      state.modernNodejsCalls = (state.modernNodejsCalls || 0) + 1;
+      saveState();
+    }
+    console.log(JSON.stringify({ status: 'succeeded', result: { value: 42 }, ...(reused ? {} : { task: { taskId: 'task-2', taskName: argv[2], reused: false } }) }));
     break;
   }
   default:
@@ -143,6 +151,21 @@ async function observedTimeouts(client, fixture) {
 test('evaluate clamps --timeout-ms into [60000, 120000], which 1.13.23+ accepts', async () => {
   await withFakeLauncher('new', async (client, fixture) => {
     assert.deepEqual(await observedTimeouts(client, fixture), [60_000, 120_000, 120_000])
+  })
+})
+
+test('evaluate adapts once to the current nodejs CLI syntax used by web_fetch', async () => {
+  await withFakeLauncher('modern', async (client, fixture) => {
+    for (let index = 0; index < 2; index += 1) {
+      const outcome = await client.evaluate({ task: 'web-fetch', code: 'return 42', readOnly: true })
+      assert.equal(outcome.result.value, 42)
+      assert.equal(outcome.task.taskName, 'web-fetch')
+    }
+    const calls = await fixture.calls()
+    assert.equal(calls.length, 3)
+    assert.ok(calls[0].includes('--read-only'))
+    assert.ok(calls.slice(1).every(argv => !argv.includes('--read-only')))
+    assert.equal(calls[0][calls[0].indexOf('--request-id') + 1], calls[1][calls[1].indexOf('--request-id') + 1])
   })
 })
 

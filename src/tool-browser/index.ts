@@ -181,11 +181,11 @@ export function apply(ctx: Context): void {
           description:
             "Short human-readable description of what this browsing task is for (e.g. \"GitHub trending research\"), shown as the tab group's name in the user's browser. Only used when `task` is omitted AND this is the first tabbit_browser call in the session — later calls (in this session, still omitting `task`) keep the name already established and ignore a new label. Pass this on your first call whenever you can.",
         },
-        // read_only：声明本次无副作用。中断后任务不会被隔离（quarantine），
-        // 恢复更安全省事。
+        // read_only：声明本次无副作用。旧版 CLI 会据此调整中断恢复策略；
+        // 新版 CLI 暂无对应参数。
         read_only: {
           type: 'boolean',
-          description: 'Declare that this call performs no mutations (safer recovery after interruptions).',
+          description: 'Declare that this call performs no mutations; supported Tabbit versions use this for safer interruption recovery.',
         },
         timeout_ms: {
           type: 'integer',

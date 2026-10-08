@@ -107,7 +107,7 @@ class TabbitFetchProvider implements WebFetchProvider {
     try {
       outcome = await client.evaluate({
         task: FETCH_TASK_NAME,
-        readOnly: true, // 抓取声明为只读：中断不会把共享任务打进隔离状态
+        readOnly: true, // 旧版 CLI 可声明只读；新版 CLI 无此参数，client 会自动兼容
         timeoutMs: EVAL_TIMEOUT_MS,
         code: buildFetchCode(url.href),
         ...(signal ? { signal } : {}),

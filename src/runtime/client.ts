@@ -159,6 +159,8 @@ interface Receipt {
 
 export class TabbitClient {
   private readonly options: TabbitClientOptions;
+  /* 新版 nodejs 不接受 --read-only/--foreground/--claim-tab；首次确认后沿用新版参数。 */
+  private modernNodejsSyntax = false;
   /* 每个任务名一条 Promise 链，实现按任务串行（见 withTaskLock）。 */
   private readonly taskQueues = new Map<string, Promise<unknown>>();
   /* 当前在飞的 CLI 子进程数（配合 MAX_CONCURRENT_CALLS 限流）。 */
@@ -327,18 +329,36 @@ export class TabbitClient {
    */
   private async evaluateOnce(request: EvaluateRequest, notes: string[], taskWasReset: boolean): Promise<EvaluateOutcome> {
     const requestId = `dsh-${randomUUID()}`;
-    const argv = ['nodejs', '--task', request.task, '--request-id', requestId];
-    if (request.readOnly) argv.push('--read-only');
-    if (request.foreground) argv.push('--foreground');
     // 超时钳位到 [60000, 120000]（两代服务端接受范围的交集，见常量注释）。
     const timeoutMs = Math.min(Math.max(request.timeoutMs ?? EVAL_TIMEOUT_CEILING_MS, EVAL_TIMEOUT_FLOOR_MS), EVAL_TIMEOUT_CEILING_MS);
-    argv.push('--timeout-ms', String(timeoutMs));
-    for (const tab of request.claimTabs ?? []) argv.push('--claim-tab', String(tab));
-
     const source = buildEvaluationSource(request.code);
-    const response = (await this.invoke(argv, source, SUBPROCESS_TIMEOUT_MS, request.signal)) as Record<string, unknown>;
+    // 先用旧参数；只有 CLI 明确返回新版 nodejs 用法（参数校验在执行前）才重试。
+    // 新版的 --tab 表示本次求值获取已有标签页，不再接受旧版的 --claim-tab。
+    const argv = (modern: boolean): string[] => {
+      const values = ['nodejs', '--task', request.task, '--request-id', requestId];
+      if (!modern && request.readOnly) values.push('--read-only');
+      if (!modern && request.foreground) values.push('--foreground');
+      values.push('--timeout-ms', String(timeoutMs));
+      for (const tab of request.claimTabs ?? []) values.push(modern ? '--tab' : '--claim-tab', String(tab));
+      return values;
+    };
+    let response: Record<string, unknown>;
+    try {
+      response = (await this.invoke(argv(this.modernNodejsSyntax), source, SUBPROCESS_TIMEOUT_MS, request.signal)) as Record<string, unknown>;
+    } catch (error) {
+      if (
+        this.modernNodejsSyntax ||
+        !(error instanceof TabbitCliError) ||
+        error.code !== CLI_ERROR_CODES.requestFailed ||
+        !/^Usage: tabbit-cli .*\bnodejs --task <name> --request-id <id> \[--tab <id>\.\.\. \| --group <id>\]/u.test(error.message)
+      ) throw error;
+      this.modernNodejsSyntax = true;
+      this.log('nodejs: CLI rejected legacy flags; using current nodejs arguments');
+      response = (await this.invoke(argv(true), source, SUBPROCESS_TIMEOUT_MS, request.signal)) as Record<string, unknown>;
+    }
 
-    const task = response.task as TaskMetadata;
+    // 新版成功回执在复用任务时省略 task；调用方仍需要稳定的任务名。
+    const task = (response.task ?? { taskId: '', taskName: request.task, reused: true }) as TaskMetadata;
     if ((request.claimTabs?.length ?? 0) > 0 && task.reused) {
       throw new TabbitCliError({
         kind: 'tab-claim',
