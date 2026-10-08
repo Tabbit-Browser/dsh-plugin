@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.5
+
+- Restored `dsh-tabbit` on DSH 0.2+: settings use the new plugin Config form,
+  while older DSH versions keep the existing settings service. Legacy Tabbit
+  settings are migrated into the new profile without overwriting values
+  already set there.
+- Fixed browser-backed `web_fetch` with current Tabbit CLI arguments. Each
+  fetch now finishes its browser task, closing the leftover `about:blank` tab
+  group. Older CLI arguments remain supported.
+- Fixed `--tab` acquisition on reused tasks with the current CLI. If a task
+  is quarantined and `checkpoint` fails or is unavailable, the plugin reports
+  the failure instead of retrying code that may already have run.
+
 ## 0.3.4
 
 - Adapted to Tabbit Browser 1.13.20+
