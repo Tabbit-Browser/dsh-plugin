@@ -50,15 +50,18 @@ dsh plugin --profile web add link:/path/to/dsh-tabbit   # 本地开发
 ## 设置
 
 ### 基本配置
-dsh Settings → tabbit，或 `$DSH_HOME/settings.yaml`
+DSH 0.2+：在插件设置中编辑 `tabbit-browser`，或在 profile 的 `cordis.patch.yml` 中写入：
 
 ```yaml
-tabbit:
-  instance: ""            # 显式指定 16 位大写 hex 实例 id（/tabbit-info 可列出）；通常留空即可
-  launcherPath: ""        # 默认自动发现：优先 ~/.local/bin/tabbit-cli，回退 tabbit-playwright；Windows 为 %LOCALAPPDATA%\Tabbit\LocalAgent\bin\tabbit-cli.exe
-  pageAccess: ask         # ask（每会话询问一次）| always | never
-  intranetFetch: ask      # web_fetch 访问内网/回环目标：ask（每会话每 origin 询问一次）| always | never
+- id: tabbit-browser
+  config:
+    instance: ""          # 显式指定 16 位大写 hex 实例 id；通常留空
+    launcherPath: ""      # 留空时自动发现 tabbit-cli
+    pageAccess: ask       # ask（每会话一次）| always | never
+    intranetFetch: ask    # 内网 web_fetch：ask（每会话每 origin 一次）| always | never
 ```
+
+DSH 0.1.x：将这四项写在 `$DSH_HOME/settings.yaml` 的 `tabbit:` 节下。升级到 0.2 后，插件会迁移旧值；已有的新配置优先。
 
 ### 实例解析优先级
 

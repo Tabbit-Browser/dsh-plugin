@@ -254,6 +254,45 @@ test('/tabbit-info 把整份报告放进命令结果文本，不向会话日志�
   }
 })
 
+test('DSH 0.2 Config supplies live settings and /tabbit-info reads the new locale form', async () => {
+  const emptyHome = await mkdtemp(join(tmpdir(), 'tabbit-config-home-'))
+  const savedHome = process.env.HOME
+  process.env.HOME = emptyHome
+  try {
+    const values = {
+      instance: '',
+      launcherPath: join(emptyHome, 'missing-tabbit-cli'),
+      pageAccess: 'ask',
+      intranetFetch: 'ask',
+    }
+    const config = Object.fromEntries(Object.keys(values).map(key => [key, { get: () => values[key] }]))
+    const commands = []
+    let service
+    const ctx = {
+      settings: { describe: () => [{ ns: 'locale', value: { preference: 'zh' } }] },
+      get: () => undefined,
+      provide(name, value) { if (name === 'tabbit') service = value },
+      effect() {},
+      on() {},
+      inject(_names, callback) { callback(ctx) },
+      skills: { registerProvider() {} },
+      systemPrompt: { section() {} },
+      commands: { register: definition => { commands.push(definition) } },
+      logger: { info() {}, warn() {} },
+    }
+    applyCore(ctx, config)
+    assert.equal(service.currentSettings().pageAccess, 'ask')
+    values.pageAccess = 'always'
+    assert.equal(service.currentSettings().pageAccess, 'always')
+    const result = await commands[0].handler({})
+    assert.equal(result.kind, 'success')
+    assert.match(result.text, /^⚠️ 未找到 Tabbit 浏览器/u)
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+  }
+})
+
 test('serves one bundled tabbit skill from SKILL.md frontmatter', async () => {
   // 置托管环境变量让 get() 的更新检查短路（不读缓存、不发网络请求），
   // 保证本测试确定性；用完恢复。

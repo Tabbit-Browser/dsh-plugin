@@ -67,6 +67,7 @@ import { listAllTabs, type TabbitTabInventory } from '../runtime/endpoint.js';
 import { TabbitCliError } from '../runtime/errors.js';
 import { defaultLauncherPath, listInstances, type TabbitInstance } from '../runtime/instances.js';
 import { checkPluginUpdate, prependUpdateNotice, readLocalVersion } from '../update-check.js';
+import { migrateLegacySettings } from './legacy-settings.js';
 
 // 下面这些 `import type {}` 是 TypeScript 的"类型副作用导入"：不引入任何
 // 运行时代码，只为了让这些包对 Context 接口的类型扩充（declare module）生效，
@@ -94,13 +95,40 @@ export interface TabbitSettings {
   intranetFetch: 'ask' | 'always' | 'never';
 }
 
-/* 上面接口对应的 schemastery 运行时校验模式（dsh settings 服务要求提供，用于校验与默认值）。 */
+/* 旧版 settings.register 使用的模式。 */
 export const SETTINGS_SCHEMA: z<TabbitSettings> = z.object({
   instance: z.string().default(''),
   launcherPath: z.string().default(''),
   pageAccess: z.union([z.const('ask'), z.const('always'), z.const('never')] as const).default('ask'),
   intranetFetch: z.union([z.const('ask'), z.const('always'), z.const('never')] as const).default('ask'),
 });
+
+/* 新版只把 volatile 字段投影到设置页；旧版仍从 SETTINGS_SCHEMA 读用户设置。 */
+export const Config = z.object({
+  instance: z.string().default('').volatile(),
+  launcherPath: z.string().default('').volatile(),
+  pageAccess: z.union([z.const('ask'), z.const('always'), z.const('never')] as const).default('ask').volatile(),
+  intranetFetch: z.union([z.const('ask'), z.const('always'), z.const('never')] as const).default('ask').volatile(),
+});
+
+interface LiveValue<T> { get(): T }
+type CurrentConfig = { [K in keyof TabbitSettings]: TabbitSettings[K] | LiveValue<TabbitSettings[K]> };
+
+/* 新版字段是 Volatile<T>，旧版字段是 T；统一读成当前的普通值。 */
+function readConfig(config: CurrentConfig): TabbitSettings {
+  const value = <K extends keyof TabbitSettings>(key: K): TabbitSettings[K] => {
+    const field = config[key];
+    return typeof field === 'object' && field !== null && 'get' in field
+      ? (field as LiveValue<TabbitSettings[K]>).get()
+      : field as TabbitSettings[K];
+  };
+  return {
+    instance: value('instance'),
+    launcherPath: value('launcherPath'),
+    pageAccess: value('pageAccess'),
+    intranetFetch: value('intranetFetch'),
+  };
+}
 
 /*
  * web_fetch 共用任务的固定名字。注意：任务名同时是浏览器里标签组的可见标题
@@ -675,19 +703,28 @@ export const name = 'tabbit-core';
 export const inject = ['settings'];
 
 /* 插件入口：dsh 加载 `dsh-tabbit` 行时调用，完成全部注册。 */
-export function apply(ctx: Context): void {
-  // ① 注册 settings 命名空间 "tabbit"。scope.get() 每次返回当前值（热加载）。
-  //    as 断言是因为 dsh 的 settings 键名类型是闭集，第三方命名空间挤不进
-  //    联合类型，只能绕过编译器（运行时完全合法）。
-  const scope = ctx.settings.register('tabbit' as Parameters<typeof ctx.settings.register>[0], SETTINGS_SCHEMA);
+export function apply(ctx: Context, config: CurrentConfig): void {
+  // 旧版向 settings 注册命名空间；新版直接读 Config 的实时字段。
+  const settings = ctx.settings as unknown as {
+    register?: (name: string, schema: z<TabbitSettings>) => { get(): TabbitSettings };
+  };
+  const legacyScope = settings.register?.('tabbit', SETTINGS_SCHEMA);
   const service = new TabbitService(
-    () => scope.get() as TabbitSettings,
+    () => legacyScope?.get() ?? readConfig(config),
     // 把 dsh 日志器接给服务与底层客户端：finish 吞错/清理失败/隔离恢复这些
     // 原本静默的路径由此在 dsh 日志里可见（排查实例漂移导致标签组残留的关键痕迹）。
     (message) => ctx.logger.info(`dsh-tabbit: ${message}`),
   );
   // ② 发布 ctx.tabbit 服务——其它五个模块 inject: ['tabbit'] 等的就是这句。
   ctx.provide('tabbit', service);
+
+  // DSH 0.2 会把旧 settings.yaml 改名为 .imported，但无法把 tabbit 节自动映射
+  // 到本包的 tabbit-browser 行。迁移只在新版运行，且不阻塞服务启动。
+  if (legacyScope === undefined) {
+    void migrateLegacySettings(ctx).catch((error: unknown) => {
+      ctx.logger.warn(`dsh-tabbit: legacy settings migration failed: ${String((error as Error)?.message ?? error)}`);
+    });
+  }
 
   // ③ 迁移清理：移除历史版本安装的 Tabbit 模式 preset（异步发起，失败只
   //    告警不阻塞插件加载；无标记的用户自管目录绝不触碰）。
@@ -755,8 +792,13 @@ export function apply(ctx: Context): void {
  * 取向一致（浏览器没点名 shipped 语言时，读中文的可能性最低）。
  */
 function readLocalePreference(settings: Context['settings']): 'zh' | 'en' {
-  const locale = settings.get('locale' as Parameters<typeof settings.get>[0]) as { preference?: string } | undefined;
-  return locale?.preference === 'zh' ? 'zh' : 'en';
+  const source = settings as unknown as {
+    get?: (name: string) => unknown;
+    describe?: () => { ns: string; value?: unknown }[];
+  };
+  const legacy = source.get?.('locale') as { preference?: unknown } | undefined;
+  const current = source.describe?.().find((entry) => entry.ns === 'locale')?.value as { preference?: unknown } | undefined;
+  return (legacy?.preference ?? current?.preference) === 'zh' ? 'zh' : 'en';
 }
 
 /*

@@ -23,7 +23,6 @@
     // (see README's Development section).
     "paths": {
       "@deepseek-ai/cordis": ["./.dsh-harness/vendor/cordis/lib/types/index.d.ts"],
-      "@deepseek-ai/schemastery": ["./.dsh-harness/vendor/schemastery/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-tools": ["./.dsh-harness/packages/core/tools/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-web": ["./.dsh-harness/packages/web/web/lib/types/index.d.ts"],
       "@deepseek-ai/dsh-settings": ["./.dsh-harness/packages/settings/settings/lib/types/index.d.ts"],

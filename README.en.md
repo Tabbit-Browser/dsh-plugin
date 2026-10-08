@@ -58,15 +58,18 @@ Scan the QR code below to join the **dsh-tabbit Developer Group** to share feedb
 
 ### Basic configuration
 
-dsh Settings → `tabbit`, or `$DSH_HOME/settings.yaml`
+DSH 0.2+: edit `tabbit-browser` in plugin settings, or add this to the profile's `cordis.patch.yml`:
 
 ```yaml
-tabbit:
-  instance: ""            # explicit 16-hex instance id (/tabbit-info lists them); usually leave empty
-  launcherPath: ""        # override; default discovers tabbit-cli, falls back to tabbit-playwright; %LOCALAPPDATA%\Tabbit\LocalAgent\bin\tabbit-cli.exe on Windows
-  pageAccess: ask         # ask (once per session) | always | never
-  intranetFetch: ask      # web_fetch to intranet/loopback targets: ask (once per session+origin) | always | never
+- id: tabbit-browser
+  config:
+    instance: ""          # explicit 16-hex instance id; usually empty
+    launcherPath: ""      # empty = discover tabbit-cli automatically
+    pageAccess: ask       # ask (once per session) | always | never
+    intranetFetch: ask    # intranet web_fetch: ask (once per session+origin) | always | never
 ```
+
+On DSH 0.1.x, put the four fields under `tabbit:` in `$DSH_HOME/settings.yaml`. The plugin migrates those values on upgrade to 0.2; existing new settings take precedence.
 
 ### Instance resolution priority
 
